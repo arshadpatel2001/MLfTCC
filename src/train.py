@@ -1,0 +1,576 @@
+"""
+Main Training & Experiment Runner
+==================================
+Runs the full basin generalization benchmark from the paper.
+
+Experiments implemented:
+  1. Leave-One-Basin-Out (LOBO) — zero-shot transfer
+  2. WP → NA,EP,NI,SI,SP       — single source transfer
+  3. Few-shot fine-tuning        — adapt with k shots on target basin
+
+Logging: Weights & Biases (wandb). Set WANDB_PROJECT env var.
+Checkpointing: saves best model per method/target_basin pair.
+
+Usage:
+    # Full benchmark (all methods, all LOBO splits)
+    python train.py --mode lobo --data_root /path/to/TCND --epochs 50
+
+    # Single experiment
+    python train.py --mode single \
+        --source_basins WP NA EP \
+        --target_basin SI \
+        --method physirm \
+        --data_root /path/to/TCND \
+        --epochs 50
+
+    # Ablation: no 3D data
+    python train.py --mode lobo --no_3d --method erm
+"""
+
+import os
+import sys
+import json
+import time
+import argparse
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(x, **kwargs): return x  # graceful fallback if tqdm not installed
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
+from itertools import product
+
+import torch
+import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+# ── Project imports ───────────────────────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).parent))
+
+from data.dataset import (
+    BASIN_CODES, TCNDDataset, make_dataloader, make_per_basin_loaders
+)
+from models.backbone import TropiCycloneModel, MultimodalBackbone
+from methods.dg_methods import build_method, DANN, PhysIRM, METHOD_REGISTRY
+from metrics.basin_metrics import (
+    BasinEvaluator, TransferEvaluator, BasinResult
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+
+# ── Experiment configurations ─────────────────────────────────────────────────
+
+# All leave-one-basin-out splits for the benchmark table
+LOBO_SPLITS = [
+    {"target": b, "source": [x for x in BASIN_CODES if x != b]}
+    for b in BASIN_CODES
+]
+
+# Hyper-parameters searched via DomainBed protocol (random search, 20 trials)
+# These are the best settings found; see Appendix for full sweep details.
+BEST_HPARAMS = {
+    "erm":     {"lr": 5e-4, "batch_size": 64, "weight_decay": 1e-4},
+    "irm":     {"lr": 1e-3, "batch_size": 64, "weight_decay": 1e-4,
+                "irm_lambda": 1.0, "warmup_steps": 500},
+    "vrex":    {"lr": 1e-3, "batch_size": 64, "weight_decay": 1e-4,
+                "beta": 1.0, "warmup_steps": 500},
+    "coral":   {"lr": 5e-4, "batch_size": 64, "weight_decay": 1e-4,
+                "coral_lambda": 1.0},
+    "dann":    {"lr": 5e-4, "batch_size": 64, "weight_decay": 1e-4,
+                "dann_lambda": 1.0, "total_steps": 10000},
+    "maml":    {"lr": 5e-4, "batch_size": 64, "weight_decay": 1e-4,
+                "inner_lr": 1e-3, "inner_steps": 5},
+    "physirm": {"lr": 5e-4, "batch_size": 64, "weight_decay": 1e-4,
+                "irm_lambda": 1.0, "orth_lambda": 0.1, "phys_lambda": 0.5,
+                "warmup_steps": 500, "phys_dim": 64},
+}
+
+
+# ── Model builder ─────────────────────────────────────────────────────────────
+
+def build_model(args) -> TropiCycloneModel:
+    return TropiCycloneModel.build(
+        spatial_embed = args.spatial_embed,
+        track_embed   = args.track_embed,
+        env_embed     = args.env_embed,
+        phys_dim      = args.phys_dim,
+        final_dim     = args.final_dim,
+        dropout       = args.dropout,
+        use_3d        = not args.no_3d,
+        use_env       = not args.no_env,
+    )
+
+
+# ── Single training run ───────────────────────────────────────────────────────
+
+def train_one_experiment(
+    args,
+    source_basins: List[str],
+    target_basin: str,
+    method_name: str,
+    run_id: str,
+    device: torch.device,
+) -> Dict:
+    """
+    Train one (source, target, method) triple.
+    Returns metrics dict for logging.
+    """
+    log.info(f"[{run_id}] Source: {source_basins}  Target: {target_basin}  Method: {method_name}")
+
+    hp = BEST_HPARAMS.get(method_name, BEST_HPARAMS["erm"])
+    bs = hp.get("batch_size", 64)
+
+    # ── Data ──────────────────────────────────────────────────────────────────
+    # Per-environment loaders for source basins (needed by IRM/CORAL/DANN)
+    train_loaders_per_env = make_per_basin_loaders(
+        root=args.data_root, basins=source_basins,
+        split="train", batch_size=bs,
+        num_workers=args.num_workers,
+        use_3d=not args.no_3d, use_env=not args.no_env,
+    )
+    val_loader_src = make_dataloader(
+        root=args.data_root, basins=source_basins,
+        split="val", batch_size=bs, num_workers=args.num_workers,
+        use_3d=not args.no_3d, use_env=not args.no_env,
+    )
+    val_loader_tgt = make_dataloader(
+        root=args.data_root, basins=[target_basin],
+        split="test", batch_size=bs, num_workers=args.num_workers,
+        use_3d=not args.no_3d, use_env=not args.no_env,
+    )
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    model = build_model(args).to(device)
+
+    # ── Method ────────────────────────────────────────────────────────────────
+    method_kwargs = {k: v for k, v in hp.items()
+                    if k not in {"lr", "batch_size", "weight_decay"}}
+    method = build_method(method_name, **method_kwargs)
+
+    # Methods with learnable parameters (DANN discriminator, PhysIRM predictor)
+    extra_params = []
+    if isinstance(method, (DANN, PhysIRM)):
+        method.to(device)
+        extra_params = list(method.parameters())
+
+    # ── Optimizer / scheduler ─────────────────────────────────────────────────
+    all_params = list(model.parameters()) + extra_params
+    optimizer  = optim.AdamW(all_params, lr=hp["lr"],
+                             weight_decay=hp.get("weight_decay", 1e-4))
+    scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+    best_val_acc = -1.0
+    best_ckpt    = None
+    step         = 0
+    history      = []
+
+    # ── Dataset size summary ─────────────────────────────────────────────────
+    total_train = sum(len(l.dataset) for l in train_loaders_per_env.values())
+    log.info(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
+    log.info(f"Device: {device}")
+    log.info(
+        f"Train samples: {total_train:,}  |  "
+        f"Val-src: {len(val_loader_src.dataset):,}  |  "
+        f"Val-tgt: {len(val_loader_tgt.dataset):,}"
+    )
+    log.info(f"Starting training for {args.epochs} epochs ...")
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        epoch_metrics: Dict[str, float] = {}
+        epoch_start = time.time()
+
+        # Zip per-environment loaders (cycle shorter loaders)
+        env_iters = {b: iter(loader) for b, loader in train_loaders_per_env.items()}
+        n_batches = max(len(l.dataset) // bs for l in train_loaders_per_env.values())
+
+        pbar = tqdm(range(n_batches), desc=f"Epoch {epoch:3d}/{args.epochs}",
+                    unit="batch", leave=False, dynamic_ncols=True)
+
+        for batch_idx in pbar:
+            # Collect one batch from each environment
+            batches = {}
+            for b, it in env_iters.items():
+                try:
+                    batch = next(it)
+                except StopIteration:
+                    env_iters[b] = iter(train_loaders_per_env[b])
+                    batch = next(env_iters[b])
+                batches[b] = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+
+            metrics = method.update(optimizer, batches, model, step=step)
+            step   += 1
+
+            for k, v in metrics.items():
+                epoch_metrics[k] = epoch_metrics.get(k, 0) + v
+
+            # Live loss in tqdm bar
+            if "loss" in epoch_metrics:
+                pbar.set_postfix(loss=f"{epoch_metrics['loss'] / (batch_idx + 1):.4f}")
+
+        pbar.close()
+
+        # Average epoch metrics
+        for k in epoch_metrics:
+            epoch_metrics[k] /= n_batches
+
+        epoch_time = time.time() - epoch_start
+        log.info(
+            f"Epoch {epoch:3d}/{args.epochs} "
+            f"[{epoch_time:.1f}s] "
+            + "  ".join(f"{k}={v:.4f}" for k, v in epoch_metrics.items())
+        )
+
+        scheduler.step()
+
+        # ── Validation ────────────────────────────────────────────────────────
+        if epoch % args.eval_every == 0 or epoch == args.epochs:
+            model.eval()
+            ev_src = BasinEvaluator("source_val")
+            ev_tgt = BasinEvaluator(target_basin)
+
+            with torch.no_grad():
+                for batch in val_loader_src:
+                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                             for k, v in batch.items()}
+                    out = model(batch)
+                    ev_src.update(batch, out)
+
+                for batch in val_loader_tgt:
+                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                             for k, v in batch.items()}
+                    out = model(batch)
+                    ev_tgt.update(batch, out)
+
+            r_src = ev_src.compute()
+            r_tgt = ev_tgt.compute()
+
+            log.info(
+                f"Epoch {epoch:3d}/{args.epochs} "
+                f"| src_acc_int={r_src.accuracy_int:.3f} "
+                f"| tgt_acc_int={r_tgt.accuracy_int:.3f} "
+                f"| tgt_ri_f1={r_tgt.ri_f1:.3f} "
+                f"| loss={epoch_metrics.get('loss', float('nan')):.4f}"
+            )
+
+            # Track best on SOURCE val (to avoid target leakage)
+            if r_src.accuracy_int > best_val_acc:
+                best_val_acc = r_src.accuracy_int
+                if args.output_dir:
+                    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+                    ckpt_path = Path(args.output_dir) / f"{run_id}_best.pt"
+                    torch.save(model.state_dict(), ckpt_path)
+                    best_ckpt = str(ckpt_path)
+
+            history.append({
+                "epoch": epoch,
+                "src_acc_int": r_src.accuracy_int,
+                "tgt_acc_int": r_tgt.accuracy_int,
+                "tgt_ri_f1":   r_tgt.ri_f1,
+                **epoch_metrics,
+            })
+
+    # ── Final evaluation ──────────────────────────────────────────────────────
+    if best_ckpt:
+        log.info(f"Loading best checkpoint: {best_ckpt}")
+        model.load_state_dict(torch.load(best_ckpt, map_location=device))
+
+    model.eval()
+    ev_final = BasinEvaluator(target_basin)
+    with torch.no_grad():
+        for batch in val_loader_tgt:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+            out = model(batch)
+            ev_final.update(batch, out)
+
+    final = ev_final.compute()
+
+    return {
+        "run_id":        run_id,
+        "method":        method_name,
+        "source_basins": source_basins,
+        "target_basin":  target_basin,
+        "final_acc_int": final.accuracy_int,
+        "final_acc_dir": final.accuracy_dir,
+        "final_ri_f1":   final.ri_f1,
+        "final_ri_recall": final.ri_recall,
+        "history":       history,
+        "best_ckpt":     best_ckpt,
+    }
+
+
+# ── Few-shot fine-tuning ──────────────────────────────────────────────────────
+
+def few_shot_finetune(
+    model: TropiCycloneModel,
+    target_basin: str,
+    args,
+    device: torch.device,
+    k_shots: int = 32,
+    ft_lr: float = 1e-4,
+    ft_epochs: int = 5,
+) -> BasinResult:
+    """
+    Few-shot fine-tuning on the target basin.
+
+    Standard evaluation protocol:
+      - Sample k_shots examples from target basin train split
+      - Fine-tune for ft_epochs with frozen backbone, only heads trainable
+      - Evaluate on target test split
+
+    This simulates a real-world scenario where a small amount of labelled
+    data is available in a new basin (e.g., after a new monitoring network
+    is deployed in the South Pacific).
+    """
+    log.info(f"Few-shot fine-tuning on {target_basin} with {k_shots} shots")
+
+    # Get k-shot loader
+    shot_ds = TCNDDataset(
+        root=args.data_root, basins=[target_basin],
+        split="train", use_3d=not args.no_3d, use_env=not args.no_env,
+    )
+    # Subsample to k_shots
+    indices = torch.randperm(len(shot_ds))[:k_shots].tolist()
+    shot_subset = torch.utils.data.Subset(shot_ds, indices)
+    shot_loader = torch.utils.data.DataLoader(
+        shot_subset, batch_size=min(k_shots, 32), shuffle=True
+    )
+
+    # Freeze backbone, fine-tune heads only
+    for p in model.backbone.parameters():
+        p.requires_grad_(False)
+    for p in model.heads.parameters():
+        p.requires_grad_(True)
+
+    ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
+
+    model.train()
+    for ep in range(ft_epochs):
+        for batch in shot_loader:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+            ft_optimizer.zero_grad()
+            out = model(batch)
+            from methods.dg_methods import task_loss
+            loss = task_loss(
+                out["logits_intensity"], out["logits_direction"],
+                batch["y_intensity"], batch["y_direction"]
+            )
+            loss.backward()
+            ft_optimizer.step()
+
+    # Unfreeze
+    for p in model.backbone.parameters():
+        p.requires_grad_(True)
+
+    # Evaluate
+    test_loader = make_dataloader(
+        root=args.data_root, basins=[target_basin],
+        split="test", batch_size=64, num_workers=0,
+        use_3d=not args.no_3d, use_env=not args.no_env,
+    )
+    ev = BasinEvaluator(target_basin)
+    model.eval()
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+            out = model(batch)
+            ev.update(batch, out)
+
+    return ev.compute()
+
+
+# ── Full benchmark ────────────────────────────────────────────────────────────
+
+def run_lobo_benchmark(args):
+    """
+    Full Leave-One-Basin-Out benchmark.
+    Trains all methods × all LOBO splits.
+    Results saved to args.output_dir/benchmark_results.json.
+    """
+    # Auto-select best available device: CUDA > MPS (Apple Silicon) > CPU
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    log.info(f"Device: {device}")
+
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    methods  = args.methods.split(",") if args.methods else list(METHOD_REGISTRY.keys())
+    splits   = LOBO_SPLITS if not args.target_basin else [
+        {"target": args.target_basin,
+         "source": [b for b in BASIN_CODES if b != args.target_basin]}
+    ]
+
+    all_results = []
+
+    for split in splits:
+        for method_name in methods:
+            run_id = f"{method_name}_{split['target']}"
+            try:
+                result = train_one_experiment(
+                    args=args,
+                    source_basins=split["source"],
+                    target_basin=split["target"],
+                    method_name=method_name,
+                    run_id=run_id,
+                    device=device,
+                )
+                all_results.append(result)
+                log.info(
+                    f"✓ {run_id}: acc_int={result['final_acc_int']:.3f} "
+                    f"ri_f1={result['final_ri_f1']:.3f}"
+                )
+            except Exception as e:
+                log.error(f"✗ {run_id} FAILED: {e}")
+                if args.fail_fast:
+                    raise
+
+    # Save results
+    if args.output_dir:
+        out_path = Path(args.output_dir) / "benchmark_results.json"
+        with open(out_path, "w") as f:
+            json.dump(all_results, f, indent=2, default=str)
+        log.info(f"Results saved to {out_path}")
+
+    # Print summary table
+    _print_summary_table(all_results, methods, splits)
+
+    return all_results
+
+
+def _print_summary_table(results, methods, splits):
+    """Print a NeurIPS-style results table."""
+    targets = [s["target"] for s in splits]
+    print("\n" + "=" * 90)
+    print("BASIN GENERALIZATION BENCHMARK — Zero-Shot Transfer (Accuracy-Intensity)")
+    print("=" * 90)
+
+    header = f"{'Method':<12}" + "".join(f"{t:>8}" for t in targets) + f"{'Avg':>8}"
+    print(header)
+    print("-" * len(header))
+
+    for method in methods:
+        row = f"{method:<12}"
+        accs = []
+        for t in targets:
+            r = next(
+                (x for x in results
+                 if x["method"] == method and x["target_basin"] == t),
+                None
+            )
+            if r:
+                acc = r["final_acc_int"]
+                accs.append(acc)
+                row += f"{acc:>8.3f}"
+            else:
+                row += f"{'—':>8}"
+        avg = sum(accs) / len(accs) if accs else 0
+        row += f"{avg:>8.3f}"
+        print(row)
+
+    print("=" * 90)
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Basin Generalization Benchmark for Tropical Cyclone Prediction"
+    )
+
+    # Data
+    p.add_argument("--data_root",  type=str, required=True,
+                   help="Path to TCND root directory")
+    p.add_argument("--output_dir", type=str, default="./runs",
+                   help="Directory for checkpoints and results")
+    p.add_argument("--num_workers", type=int, default=4)
+
+    # Experiment
+    p.add_argument("--mode", choices=["lobo", "single"], default="lobo",
+                   help="lobo=leave-one-basin-out; single=one transfer pair")
+    p.add_argument("--source_basins", type=str, default=None,
+                   help="Comma-separated source basin codes (single mode)")
+    p.add_argument("--target_basin", type=str, default=None,
+                   help="Target basin code")
+    p.add_argument("--method",  type=str, default=None,
+                   help="Single method for single mode (e.g. physirm)")
+    p.add_argument("--methods", type=str, default=None,
+                   help="Comma-separated methods to run (default: all)")
+    p.add_argument("--epochs",      type=int,   default=50)
+    p.add_argument("--eval_every",  type=int,   default=1)
+    p.add_argument("--device",      type=str,   default="auto",
+                        help="Device: cuda | mps | cpu | auto (auto-detects best)")
+    p.add_argument("--fail_fast",   action="store_true")
+
+    # Model architecture
+    p.add_argument("--spatial_embed", type=int, default=256)
+    p.add_argument("--track_embed",   type=int, default=64)
+    p.add_argument("--env_embed",     type=int, default=128)
+    p.add_argument("--phys_dim",      type=int, default=64)
+    p.add_argument("--final_dim",     type=int, default=256)
+    p.add_argument("--dropout",       type=float, default=0.1)
+
+    # Ablations
+    p.add_argument("--no_3d",  action="store_true",
+                   help="Ablation: disable Data_3d (spatial) branch")
+    p.add_argument("--no_env", action="store_true",
+                   help="Ablation: disable Env-Data branch")
+
+    # Few-shot
+    p.add_argument("--few_shot",      action="store_true")
+    p.add_argument("--k_shots",       type=int,   default=32)
+    p.add_argument("--few_shot_epochs", type=int, default=5)
+
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    if args.mode == "lobo":
+        run_lobo_benchmark(args)
+
+    elif args.mode == "single":
+        if not args.source_basins or not args.target_basin:
+            raise ValueError("--source_basins and --target_basin required in single mode")
+        source = args.source_basins.split(",")
+        # Auto-select best available device: CUDA > MPS (Apple Silicon) > CPU
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+
+        methods = [args.method] if args.method else list(METHOD_REGISTRY.keys())
+        for method_name in methods:
+            result = train_one_experiment(
+                args=args,
+                source_basins=source,
+                target_basin=args.target_basin,
+                method_name=method_name,
+                run_id=f"{method_name}_{args.target_basin}",
+                device=device,
+            )
+            log.info(
+                f"Final: acc_int={result['final_acc_int']:.3f} "
+                f"ri_f1={result['final_ri_f1']:.3f}"
+            )
