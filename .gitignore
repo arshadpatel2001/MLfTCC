@@ -3,3 +3,4 @@ src/runs/
 __pycache__/
 *.pt
 others/
+logs/
