@@ -111,7 +111,7 @@ class SpatialEncoder(nn.Module):
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.gmp = nn.AdaptiveMaxPool2d(1)
 
-        # Pressure-level attention: learn which levels matter most
+        # Pressure-level MLP projection (projects full spatial feature to embed_dim)
         self.level_attn = nn.Sequential(
             nn.Linear(512 * 2, 128),
             nn.ReLU(),
@@ -321,21 +321,22 @@ class MultimodalBackbone(nn.Module):
         z_full = self.projector(torch.cat(parts, dim=-1))  # (B, final_dim)
 
         # Split into [z_env | z_phys]
-        z_env  = z_full[:, :self.env_dim]                  # (B, env_dim)
-        z_phys = z_full[:, self.env_dim:]                  # (B, phys_dim)
+        z_env      = z_full[:, :self.env_dim]              # (B, env_dim)
+        z_phys_raw = z_full[:, self.env_dim:]              # (B, phys_dim)
 
         # Blend z_phys with physics encoder output (anchors to physical meaning)
         phys_enc_out = self.phys_enc(batch["phys_features"])  # (B, phys_dim)
-        z_phys = z_phys + self.phys_align(phys_enc_out)       # residual physics injection
+        z_phys = z_phys_raw + self.phys_align(phys_enc_out)       # residual physics injection
 
         # Reconstruct z from the updated sub-spaces so that the prediction
         # heads (and ERM/CORAL/DANN losses) see the physics-enriched z_phys.
         z = torch.cat([z_env, z_phys], dim=-1)  # (B, final_dim)
 
         return {
-            "z":      z,         # reconstructed full representation (includes physics injection)
-            "z_phys": z_phys,    # physics sub-space (PhysIRM invariance target)
-            "z_env":  z_env,     # synoptic sub-space (PhysIRM allows to shift)
+            "z":          z,             # reconstructed full representation (includes physics injection)
+            "z_phys":     z_phys,        # physics sub-space (PhysIRM invariance target)
+            "z_phys_raw": z_phys_raw,    # raw physics sub-space (for grounding loss)
+            "z_env":      z_env,         # synoptic sub-space (PhysIRM allows to shift)
         }
 
     def get_output_dim(self) -> int:

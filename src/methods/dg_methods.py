@@ -396,18 +396,20 @@ class MAML(DGMethod):
 
     def _inner_loop(
         self, model: nn.Module, support_batch: dict
-    ) -> Tuple[nn.Module, List[torch.Tensor]]:
+    ) -> dict:
         """
         Perform inner-loop adaptation on support set.
-        Returns adapted parameter list (not a new model to avoid deep copies at scale).
+        Returns adapted parameter list and buffers (not a new model to avoid deep copies at scale).
         """
         # FOMAML: compute gradients, create adapted params manually
         fast_weights = {n: p.clone() for n, p in model.named_parameters()}
+        fast_buffers = {n: b.clone() for n, b in model.named_buffers()}
 
         inner_start = time.time()
-        for _ in tqdm(range(self.inner_steps), desc="MAML Inner", leave=False, dynamic_ncols=True):
-            # Forward with fast weights
-            out  = self._forward_with_weights(model, support_batch, fast_weights)
+        for _ in range(self.inner_steps):
+            params_and_buffers = {**fast_weights, **fast_buffers}
+            # Forward with fast weights and buffers
+            out  = self._forward_with_weights(model, support_batch, params_and_buffers)
             loss = task_loss(out["logits_intensity"], out["logits_direction"],
                              support_batch["y_intensity"], support_batch["y_direction"])
             grads = torch.autograd.grad(loss, fast_weights.values(),
@@ -421,7 +423,7 @@ class MAML(DGMethod):
         import logging
         logging.getLogger(__name__).debug(f"MAML inner loop took {time.time() - inner_start:.4f}s")
 
-        return fast_weights
+        return {**fast_weights, **fast_buffers}
 
     def _forward_with_weights(self, model: nn.Module, batch: dict, weights: dict) -> dict:
         """
@@ -581,8 +583,9 @@ class PhysIRM(DGMethod, nn.Module):
 
         for basin, batch in batches.items():
             out = model(batch)
-            z_phys = out["z_phys"]  # (B, phys_dim)
-            z_env  = out["z_env"]   # (B, env_dim)
+            z_phys     = out["z_phys"]      # (B, phys_dim)
+            z_phys_raw = out["z_phys_raw"]  # (B, phys_dim)
+            z_env      = out["z_env"]       # (B, env_dim)
 
             # ── ERM loss (on full representation) ─────────────────────────
             erm_losses.append(
@@ -592,12 +595,14 @@ class PhysIRM(DGMethod, nn.Module):
 
             # ── IRM penalty on physics sub-space only ──────────────────────
             # We apply IRM on the classification logits derived ONLY from z_phys.
-            # This requires a separate head on z_phys. For efficiency, we use
-            # the full logits but scale by the physics component's contribution.
-            # Full version: requires a dedicated phys-only head (see ablation).
+            # This ensures that the IRM penalty (and its gradients) only affects
+            # the physics sub-space and the backbone, without leaking into z_env.
+            z_phys_only = torch.cat([torch.zeros_like(z_env), z_phys], dim=-1)
+            logits_phys_int, logits_phys_dir = model.heads(z_phys_only)
+
             irm_pens.append(
                 self._irm_penalty_phys(
-                    out["logits_intensity"], out["logits_direction"],
+                    logits_phys_int, logits_phys_dir,
                     batch["y_intensity"], batch["y_direction"]
                 )
             )
@@ -607,7 +612,7 @@ class PhysIRM(DGMethod, nn.Module):
 
             # ── Physics grounding loss ─────────────────────────────────────
             phys_pens.append(
-                self._physics_grounding_loss(z_phys, batch["phys_features"])
+                self._physics_grounding_loss(z_phys_raw, batch["phys_features"])
             )
 
         erm       = torch.stack(erm_losses).mean()

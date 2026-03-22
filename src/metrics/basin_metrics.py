@@ -97,23 +97,25 @@ class TransferResult:
 # ── Core metric functions ─────────────────────────────────────────────────────
 
 def accuracy(preds: np.ndarray, labels: np.ndarray) -> float:
+    if len(preds) == 0: return 0.0
     return float((preds == labels).mean())
 
 
 def weighted_f1(preds: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
     """Weighted F1 score (weighted by class support / frequency)."""
     from collections import Counter
+    if len(labels) == 0: return 0.0
     support = Counter(labels)
     total   = len(labels)
 
     f1s, weights = [], []
     for c in range(n_classes):
-        tp = ((preds == c) & (labels == c)).sum()
-        fp = ((preds == c) & (labels != c)).sum()
-        fn = ((preds != c) & (labels == c)).sum()
-        prec = tp / (tp + fp + 1e-8)
-        rec  = tp / (tp + fn + 1e-8)
-        f1   = 2 * prec * rec / (prec + rec + 1e-8)
+        tp = float(((preds == c) & (labels == c)).sum())
+        fp = float(((preds == c) & (labels != c)).sum())
+        fn = float(((preds != c) & (labels == c)).sum())
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
         f1s.append(f1)
         weights.append(support[c] / total)
 
@@ -129,10 +131,14 @@ def ri_metrics(preds: np.ndarray, labels: np.ndarray) -> Tuple[float, float, flo
     tp = ((preds == RI_CLASS) & (labels == RI_CLASS)).sum()
     fp = ((preds == RI_CLASS) & (labels != RI_CLASS)).sum()
     fn = ((preds != RI_CLASS) & (labels == RI_CLASS)).sum()
-    prec = tp / (tp + fp + 1e-8)
-    rec  = tp / (tp + fn + 1e-8)
-    f1   = 2 * prec * rec / (prec + rec + 1e-8)
-    return float(prec), float(rec), float(f1)
+    
+    # Handle edge cases where there are no RI samples or predictions
+    # This prevents mathematically meaningless results (0/1e-8) when RI is absent.
+    prec = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    rec  = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    f1   = float(2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    
+    return prec, rec, f1
 
 
 # ── Novel Metric: Basin Transfer Gap (BTG) ───────────────────────────────────
@@ -206,7 +212,7 @@ def coral_distance(
     def cov(z):
         n, d = z.shape
         z = z - z.mean(0, keepdim=True)
-        return (z.T @ z) / (n - 1 + 1e-8)
+        return (z.T @ z) / (max(n - 1, 1) + 1e-8)
 
     cs = cov(feat_source.float())
     ct = cov(feat_target.float())
@@ -252,6 +258,14 @@ class BasinEvaluator:
             self._features.append(out["z"].detach().cpu())
 
     def compute(self) -> BasinResult:
+        if not self._preds_int:
+            # Evaluator was never updated — return a zero-filled result rather
+            # than crashing with NaN from numpy mean on an empty array.
+            return BasinResult(
+                basin=self.basin_name, n_samples=0,
+                accuracy_int=0.0, accuracy_dir=0.0, f1_int=0.0,
+                ri_recall=0.0, ri_precision=0.0, ri_f1=0.0,
+            )
         pi = np.array(self._preds_int)
         li = np.array(self._labels_int)
         pd = np.array(self._preds_dir)

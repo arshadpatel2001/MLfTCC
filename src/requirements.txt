@@ -1,11 +1,22 @@
+# Core deep learning
 torch>=2.0.0
 torchvision>=0.15.0
-einops>=0.6.0
+
+# Data / geoscience
 xarray>=0.19.0
 netCDF4>=1.6.0
-scikit-learn>=1.2.0
 numpy>=1.23.0
 pandas>=1.5.0
+
+# Evaluation & visualisation
+scikit-learn>=1.2.0
 matplotlib>=3.6.0
+
+# Utilities
 tqdm>=4.64.0
-wandb>=0.15.0
+
+# Optional: experiment tracking (referenced in docstring only; not imported in code)
+# wandb>=0.15.0
+
+# Optional: second-order MAML inner loop (only needed if first_order=False in MAML)
+# higher>=0.2.1

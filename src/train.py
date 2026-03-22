@@ -31,6 +31,7 @@ import os
 import sys
 import json
 import time
+import copy
 import argparse
 try:
     from tqdm import tqdm
@@ -39,7 +40,6 @@ except ImportError:
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
-from itertools import product
 
 import torch
 import torch.optim as optim
@@ -164,6 +164,12 @@ def train_one_experiment(
     # ── Method ────────────────────────────────────────────────────────────────
     method_kwargs = {k: v for k, v in hp.items()
                     if k not in {"lr", "batch_size", "weight_decay"}}
+    # Inject architecture-dependent hyperparameters that must match the model.
+    # Without this, changing --final_dim causes a runtime shape error in DANN's
+    # discriminator on the first forward pass.
+    if method_name == "dann":
+        method_kwargs.setdefault("feature_dim", args.final_dim)
+        method_kwargs.setdefault("n_domains", len(BASIN_CODES))
     method = build_method(method_name, **method_kwargs)
 
     # Methods with learnable parameters (DANN discriminator, PhysIRM predictor)
@@ -197,12 +203,16 @@ def train_one_experiment(
 
     for epoch in range(1, args.epochs + 1):
         model.train()
+        if isinstance(method, torch.nn.Module):
+            method.train()
         epoch_metrics: Dict[str, float] = {}
         epoch_start = time.time()
 
         # Zip per-environment loaders (cycle shorter loaders)
         env_iters = {b: iter(loader) for b, loader in train_loaders_per_env.items()}
-        n_batches = max(1, max(len(l.dataset) // bs for l in train_loaders_per_env.values()))
+        # Use len(loader) — the DataLoader is the authoritative source for
+        # batch count per epoch (correctly handles drop_last and safe_bs).
+        n_batches = max(1, max(len(l) for l in train_loaders_per_env.values()))
 
         pbar = tqdm(range(n_batches), desc=f"Epoch {epoch:3d}/{args.epochs}",
                     unit="batch", leave=False, dynamic_ncols=True)
@@ -249,6 +259,8 @@ def train_one_experiment(
         # ── Validation ────────────────────────────────────────────────────────
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             model.eval()
+            if isinstance(method, torch.nn.Module):
+                method.eval()
             ev_src = BasinEvaluator("source_val")
             ev_tgt = BasinEvaluator(target_basin)
 
@@ -303,7 +315,8 @@ def train_one_experiment(
     # ── Final evaluation ──────────────────────────────────────────────────────
     if best_ckpt:
         log.info(f"Loading best checkpoint: {best_ckpt}")
-        checkpoint = torch.load(best_ckpt, map_location=device)
+        # weights_only=False: checkpoint contains nested dicts requiring full unpickling.
+        checkpoint = torch.load(best_ckpt, map_location=device, weights_only=False)
         if "model" in checkpoint:
             model.load_state_dict(checkpoint["model"])
             if isinstance(method, torch.nn.Module) and checkpoint.get("method"):
@@ -312,6 +325,8 @@ def train_one_experiment(
             model.load_state_dict(checkpoint)
 
     model.eval()
+    if isinstance(method, torch.nn.Module):
+        method.eval()
     ev_final = BasinEvaluator(target_basin)
     final_ev_start = time.time()
     with torch.no_grad():
@@ -324,7 +339,7 @@ def train_one_experiment(
 
     final = ev_final.compute()
 
-    return {
+    result = {
         "run_id":        run_id,
         "method":        method_name,
         "source_basins": source_basins,
@@ -336,6 +351,22 @@ def train_one_experiment(
         "history":       history,
         "best_ckpt":     best_ckpt,
     }
+
+    # ── Few-shot fine-tuning on target basin (if enabled) ─────────
+    if args.few_shot:
+        fs_result = few_shot_finetune(
+            model=model,
+            target_basin=target_basin,
+            args=args,
+            device=device,
+            k_shots=args.k_shots,
+            ft_epochs=args.few_shot_epochs,
+        )
+        result["few_shot_acc_int"] = fs_result.accuracy_int
+        result["few_shot_ri_f1"] = fs_result.ri_f1
+        log.info(f"Few-shot ({args.k_shots} shots) on {target_basin}: acc={fs_result.accuracy_int:.3f}, ri_f1={fs_result.ri_f1:.3f}")
+
+    return result
 
 
 # ── Few-shot fine-tuning ──────────────────────────────────────────────────────
@@ -362,17 +393,27 @@ def few_shot_finetune(
     is deployed in the South Pacific).
     """
     log.info(f"Few-shot fine-tuning on {target_basin} with {k_shots} shots")
+    from methods.dg_methods import task_loss
 
     # Get k-shot loader
     shot_ds = TCNDDataset(
         root=args.data_root, basins=[target_basin],
         split="train", use_3d=not args.no_3d, use_env=not args.no_env,
     )
-    # Subsample to k_shots
-    indices = torch.randperm(len(shot_ds))[:k_shots].tolist()
+    # Subsample to k_shots safely bounding to dataset size
+    k_shots = min(k_shots, len(shot_ds))
+    if k_shots == 0:
+        log.warning(f"Target basin {target_basin} has 0 training samples! Skipping few-shot.")
+        ev = BasinEvaluator(target_basin)
+        return ev.compute()
+
+    # Fixed seed per k_shots value for reproducible k-shot subset selection.
+    rng_seed = 42 + k_shots
+    indices = torch.randperm(len(shot_ds),
+                             generator=torch.Generator().manual_seed(rng_seed))[:k_shots].tolist()
     shot_subset = torch.utils.data.Subset(shot_ds, indices)
     shot_loader = torch.utils.data.DataLoader(
-        shot_subset, batch_size=min(k_shots, 32), shuffle=True
+        shot_subset, batch_size=max(1, min(k_shots, 32)), shuffle=True
     )
 
     # Freeze backbone, fine-tune heads only
@@ -383,7 +424,11 @@ def few_shot_finetune(
 
     ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
 
-    model.train()
+    # Save entire model state to strictly prevent contamination of the zero-shot baseline
+    orig_state = copy.deepcopy(model.state_dict())
+
+    model.eval()
+    model.heads.train()
     fs_start = time.time()
     for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True):
         ep_start = time.time()
@@ -392,7 +437,6 @@ def few_shot_finetune(
                      for k, v in batch.items()}
             ft_optimizer.zero_grad()
             out = model(batch)
-            from methods.dg_methods import task_loss
             loss = task_loss(
                 out["logits_intensity"], out["logits_direction"],
                 batch["y_intensity"], batch["y_direction"]
@@ -423,6 +467,9 @@ def few_shot_finetune(
             ev.update(batch, out)
     log.info(f"Few-shot evaluation took {time.time() - fs_eval_start:.2f}s")
 
+    # Restore full original model state
+    model.load_state_dict(orig_state)
+
     return ev.compute()
 
 
@@ -440,7 +487,8 @@ def run_lobo_benchmark(args):
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    methods  = args.methods.split(",") if args.methods else list(METHOD_REGISTRY.keys())
+    method_arg = args.methods or args.method
+    methods  = [m.strip() for m in method_arg.split(",")] if method_arg else list(METHOD_REGISTRY.keys())
     splits   = LOBO_SPLITS if not args.target_basin else [
         {"target": args.target_basin,
          "source": [b for b in BASIN_CODES if b != args.target_basin]}
@@ -534,7 +582,8 @@ def run_incremental_benchmark(args):
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
-    methods = args.methods.split(",") if args.methods else list(METHOD_REGISTRY.keys())
+    method_arg = args.methods or args.method
+    methods = [m.strip() for m in method_arg.split(",")] if method_arg else list(METHOD_REGISTRY.keys())
     
     # Target basins
     targets = [args.target_basin] if args.target_basin else BASIN_CODES
@@ -544,7 +593,7 @@ def run_incremental_benchmark(args):
     bench_start = time.time()
     for target in tqdm(targets, desc="Incremental Targets", dynamic_ncols=True):
         if args.source_basins:
-            available_sources = args.source_basins.split(",")
+            available_sources = [s.strip() for s in args.source_basins.split(",")]
         else:
             available_sources = [b for b in BASIN_CODES if b != target]
             
@@ -685,10 +734,11 @@ if __name__ == "__main__":
     elif args.mode == "single":
         if not args.source_basins or not args.target_basin:
             raise ValueError("--source_basins and --target_basin required in single mode")
-        source = args.source_basins.split(",")
+        source = [s.strip() for s in args.source_basins.split(",")]
         device = select_device(args)
 
-        methods = [args.method] if args.method else list(METHOD_REGISTRY.keys())
+        method_arg = args.method or args.methods
+        methods = [m.strip() for m in method_arg.split(",")] if method_arg else list(METHOD_REGISTRY.keys())
         for method_name in methods:
             result = train_one_experiment(
                 args=args,
@@ -702,29 +752,3 @@ if __name__ == "__main__":
                 f"Final: acc_int={result['final_acc_int']:.3f} "
                 f"ri_f1={result['final_ri_f1']:.3f}"
             )
-
-            # ── Few-shot fine-tuning on target basin (if enabled) ─────────
-            if args.few_shot:
-                # Load the best checkpoint if one was saved
-                if result.get("best_ckpt"):
-                    model = build_model(args).to(device)
-                    checkpoint = torch.load(result["best_ckpt"], map_location=device)
-                    model.load_state_dict(
-                        checkpoint["model"] if "model" in checkpoint else checkpoint
-                    )
-                else:
-                    model = build_model(args).to(device)
-
-                fs_result = few_shot_finetune(
-                    model=model,
-                    target_basin=args.target_basin,
-                    args=args,
-                    device=device,
-                    k_shots=args.k_shots,
-                    ft_epochs=args.few_shot_epochs,
-                )
-                log.info(
-                    f"Few-shot ({args.k_shots} shots): "
-                    f"acc_int={fs_result.accuracy_int:.3f} "
-                    f"ri_f1={fs_result.ri_f1:.3f}"
-                )
