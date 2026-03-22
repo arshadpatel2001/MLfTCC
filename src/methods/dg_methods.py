@@ -30,7 +30,6 @@ try:
     from tqdm import tqdm
 except ImportError:
     def tqdm(x, **kwargs): return x
-from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
@@ -196,7 +195,9 @@ class VREx(DGMethod):
 
         losses_t = torch.stack(losses)
         erm  = losses_t.mean()
-        var  = losses_t.var()
+        # Use unbiased=False to avoid NaN when there is only 1 environment
+        # (Bessel's correction divides by N-1 = 0).
+        var  = losses_t.var(unbiased=False)
         total = erm + beta * var
 
         return total, {
@@ -227,7 +228,7 @@ class CORAL(DGMethod):
         """Compute covariance matrix of (B, D) feature matrix."""
         n, d = z.shape
         z = z - z.mean(dim=0, keepdim=True)
-        return (z.T @ z) / (n - 1 + 1e-8)
+        return (z.T @ z) / (max(n - 1, 1) + 1e-8)
 
     def compute_loss(self, batches: Dict[str, dict], model: nn.Module):
         envs  = list(batches.keys())
@@ -245,7 +246,7 @@ class CORAL(DGMethod):
         erm = torch.stack(losses).mean()
 
         # All pairwise covariance distances
-        coral_pen = torch.tensor(0.0, device=erm.device)
+        coral_pen = torch.zeros(1, device=erm.device).squeeze()
         n_pairs   = 0
         for i in range(len(envs)):
             for j in range(i + 1, len(envs)):
@@ -294,7 +295,7 @@ class DomainDiscriminator(nn.Module):
         return self.net(z_rev)
 
 
-class DANN(DGMethod):
+class DANN(DGMethod, nn.Module):
     """
     Domain-Adversarial Neural Networks (Ganin et al., JMLR 2016).
 
@@ -302,6 +303,9 @@ class DANN(DGMethod):
     Forces the encoder to produce basin-invariant representations.
 
     GRL schedule: α ramps from 0 → 1 over training, following original paper.
+
+    Inherits nn.Module so that the discriminator's parameters are properly
+    tracked by PyTorch (state_dict, to(), etc.).
     """
 
     def __init__(
@@ -311,17 +315,14 @@ class DANN(DGMethod):
         dann_lambda: float = 1.0,
         total_steps: int = 10000,
     ):
+        nn.Module.__init__(self)
         self.dann_lambda  = dann_lambda
         self.total_steps  = total_steps
         self._step        = 0
         self.discriminator = DomainDiscriminator(feature_dim, n_domains)
 
-    def to(self, device):
-        self.discriminator = self.discriminator.to(device)
-        return self
-
-    def parameters(self):
-        return self.discriminator.parameters()
+    # to() and parameters() are inherited from nn.Module;
+    # the discriminator is a registered sub-module via __init__.
 
     def _alpha(self):
         """GRL strength schedule from Ganin et al."""
@@ -442,6 +443,8 @@ class MAML(DGMethod):
         meta_losses = []
         for basin, batch in batches.items():
             n  = batch["data_1d"].shape[0]
+            if n < 2:
+                continue
             n_s = n // 2
 
             support = {k: (v[:n_s] if isinstance(v, torch.Tensor) else v)
@@ -456,13 +459,17 @@ class MAML(DGMethod):
                                query["y_intensity"], query["y_direction"])
             meta_losses.append(loss_q)
 
+        if not meta_losses:
+            device = next(model.parameters()).device
+            return torch.tensor(0.0, device=device, requires_grad=True), {"maml_meta_loss": 0.0}
+
         total = torch.stack(meta_losses).mean()
         return total, {"maml_meta_loss": total.item()}
 
 
 # ── 7. PhysIRM (PROPOSED) ─────────────────────────────────────────────────────
 
-class PhysIRM(DGMethod):
+class PhysIRM(DGMethod, nn.Module):
     """
     Physics-guided Invariant Risk Minimization [PROPOSED METHOD].
     ─────────────────────────────────────────────────────────────
@@ -501,6 +508,9 @@ class PhysIRM(DGMethod):
         - Emanuel (1986) MPI theory.        JAS 43(6):585–604
         - Kaplan & DeMaria (2003) RI preds. WAF 18(6):1093–1108
         - Lu et al. (2021) Physics-guided DG. NeurIPS 2021.
+
+    Inherits nn.Module so that the phys_predictor's parameters are properly
+    tracked by PyTorch (state_dict, to(), etc.).
     """
 
     def __init__(
@@ -512,6 +522,7 @@ class PhysIRM(DGMethod):
         warmup_steps:  int   = 500,    # ramp IRM penalty from 0 → irm_lambda
         n_phys_feat:   int   = 8,      # number of input physics features
     ):
+        nn.Module.__init__(self)
         self.irm_lambda   = irm_lambda
         self.orth_lambda  = orth_lambda
         self.phys_lambda  = phys_lambda
@@ -527,12 +538,8 @@ class PhysIRM(DGMethod):
             nn.Linear(64, n_phys_feat),
         )
 
-    def to(self, device):
-        self.phys_predictor = self.phys_predictor.to(device)
-        return self
-
-    def parameters(self):
-        return self.phys_predictor.parameters()
+    # to() and parameters() are inherited from nn.Module;
+    # the phys_predictor is a registered sub-module via __init__.
 
     def _irm_penalty_phys(
         self, logits_int, logits_dir, y_int, y_dir
@@ -553,7 +560,7 @@ class PhysIRM(DGMethod):
         n = z_phys.shape[0]
         z_p = z_phys - z_phys.mean(0, keepdim=True)
         z_e = z_env  - z_env.mean(0,  keepdim=True)
-        cross_cov = (z_p.T @ z_e) / (n - 1 + 1e-8)
+        cross_cov = (z_p.T @ z_e) / (max(n - 1, 1) + 1e-8)
         return cross_cov.pow(2).mean()
 
     def _physics_grounding_loss(

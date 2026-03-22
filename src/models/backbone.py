@@ -328,8 +328,12 @@ class MultimodalBackbone(nn.Module):
         phys_enc_out = self.phys_enc(batch["phys_features"])  # (B, phys_dim)
         z_phys = z_phys + self.phys_align(phys_enc_out)       # residual physics injection
 
+        # Reconstruct z from the updated sub-spaces so that the prediction
+        # heads (and ERM/CORAL/DANN losses) see the physics-enriched z_phys.
+        z = torch.cat([z_env, z_phys], dim=-1)  # (B, final_dim)
+
         return {
-            "z":      z_full,    # full representation (ERM, CORAL, DANN use this)
+            "z":      z,         # reconstructed full representation (includes physics injection)
             "z_phys": z_phys,    # physics sub-space (PhysIRM invariance target)
             "z_env":  z_env,     # synoptic sub-space (PhysIRM allows to shift)
         }

@@ -285,7 +285,11 @@ def train_one_experiment(
                 if args.output_dir:
                     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
                     ckpt_path = Path(args.output_dir) / f"{run_id}_best.pt"
-                    torch.save(model.state_dict(), ckpt_path)
+                    state = {
+                        "model": model.state_dict(),
+                        "method": method.state_dict() if isinstance(method, torch.nn.Module) else {}
+                    }
+                    torch.save(state, ckpt_path)
                     best_ckpt = str(ckpt_path)
 
             history.append({
@@ -299,7 +303,13 @@ def train_one_experiment(
     # ── Final evaluation ──────────────────────────────────────────────────────
     if best_ckpt:
         log.info(f"Loading best checkpoint: {best_ckpt}")
-        model.load_state_dict(torch.load(best_ckpt, map_location=device))
+        checkpoint = torch.load(best_ckpt, map_location=device)
+        if "model" in checkpoint:
+            model.load_state_dict(checkpoint["model"])
+            if isinstance(method, torch.nn.Module) and checkpoint.get("method"):
+                method.load_state_dict(checkpoint["method"])
+        else:
+            model.load_state_dict(checkpoint)
 
     model.eval()
     ev_final = BasinEvaluator(target_basin)
@@ -698,8 +708,9 @@ if __name__ == "__main__":
                 # Load the best checkpoint if one was saved
                 if result.get("best_ckpt"):
                     model = build_model(args).to(device)
+                    checkpoint = torch.load(result["best_ckpt"], map_location=device)
                     model.load_state_dict(
-                        torch.load(result["best_ckpt"], map_location=device)
+                        checkpoint["model"] if "model" in checkpoint else checkpoint
                     )
                 else:
                     model = build_model(args).to(device)
