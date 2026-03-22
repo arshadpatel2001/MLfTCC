@@ -25,6 +25,12 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
 
+import time
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(x, **kwargs): return x
+
 import torch
 import torch.nn.functional as F
 
@@ -95,7 +101,7 @@ def accuracy(preds: np.ndarray, labels: np.ndarray) -> float:
 
 
 def weighted_f1(preds: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
-    """Macro-weighted F1 score (weights = class support)."""
+    """Weighted F1 score (weighted by class support / frequency)."""
     from collections import Counter
     support = Counter(labels)
     total   = len(labels)
@@ -320,10 +326,11 @@ class TransferEvaluator:
         source_basins = list(source_loaders.keys())
         per_basin_results = {}
 
+        eval_start = time.time()
         for basin, loader in source_loaders.items():
             ev = BasinEvaluator(basin)
             with torch.no_grad():
-                for batch in loader:
+                for batch in tqdm(loader, desc=f"Eval Source {basin}", dynamic_ncols=True, leave=False):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
@@ -339,13 +346,17 @@ class TransferEvaluator:
         # ── Target zero-shot performance ──────────────────────────────────────
         target_ev = BasinEvaluator(target_basin)
         with torch.no_grad():
-            for batch in target_loader:
+            for batch in tqdm(target_loader, desc=f"Eval Target {target_basin}", dynamic_ncols=True, leave=False):
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
                 out = model(batch)
                 target_ev.update(batch, out)
         target_r = target_ev.compute()
         per_basin_results[target_basin] = target_r
+
+        import logging
+        log = logging.getLogger(__name__)
+        log.info(f"Cross-basin evaluation for {target_basin} took {time.time() - eval_start:.2f}s")
 
         # ── Proposed metrics ──────────────────────────────────────────────────
         btg  = basin_transfer_gap(source_acc_int, target_r.accuracy_int)

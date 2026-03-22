@@ -65,6 +65,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def select_device(args) -> torch.device:
+    """Select compute device respecting --device flag."""
+    if hasattr(args, 'device') and args.device and args.device != "auto":
+        return torch.device(args.device)
+    # Auto-select best available device: CUDA > MPS (Apple Silicon) > CPU
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 # ── Experiment configurations ─────────────────────────────────────────────────
 
 # All leave-one-basin-out splits for the benchmark table
@@ -190,7 +202,7 @@ def train_one_experiment(
 
         # Zip per-environment loaders (cycle shorter loaders)
         env_iters = {b: iter(loader) for b, loader in train_loaders_per_env.items()}
-        n_batches = max(len(l.dataset) // bs for l in train_loaders_per_env.values())
+        n_batches = max(1, max(len(l.dataset) // bs for l in train_loaders_per_env.values()))
 
         pbar = tqdm(range(n_batches), desc=f"Epoch {epoch:3d}/{args.epochs}",
                     unit="batch", leave=False, dynamic_ncols=True)
@@ -240,18 +252,21 @@ def train_one_experiment(
             ev_src = BasinEvaluator("source_val")
             ev_tgt = BasinEvaluator(target_basin)
 
+            val_start = time.time()
             with torch.no_grad():
-                for batch in val_loader_src:
+                for batch in tqdm(val_loader_src, desc="Val Source", leave=False, dynamic_ncols=True):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
                     ev_src.update(batch, out)
 
-                for batch in val_loader_tgt:
+                for batch in tqdm(val_loader_tgt, desc="Val Target", leave=False, dynamic_ncols=True):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
                     ev_tgt.update(batch, out)
+            val_time = time.time() - val_start
+            log.info(f"Validation took {val_time:.2f}s")
 
             r_src = ev_src.compute()
             r_tgt = ev_tgt.compute()
@@ -288,12 +303,14 @@ def train_one_experiment(
 
     model.eval()
     ev_final = BasinEvaluator(target_basin)
+    final_ev_start = time.time()
     with torch.no_grad():
-        for batch in val_loader_tgt:
+        for batch in tqdm(val_loader_tgt, desc="Final Eval", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
             ev_final.update(batch, out)
+    log.info(f"Final evaluation took {time.time() - final_ev_start:.2f}s")
 
     final = ev_final.compute()
 
@@ -357,8 +374,10 @@ def few_shot_finetune(
     ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
 
     model.train()
-    for ep in range(ft_epochs):
-        for batch in shot_loader:
+    fs_start = time.time()
+    for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True):
+        ep_start = time.time()
+        for batch in tqdm(shot_loader, desc=f"Epoch {ep+1}/{ft_epochs}", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             ft_optimizer.zero_grad()
@@ -370,6 +389,8 @@ def few_shot_finetune(
             )
             loss.backward()
             ft_optimizer.step()
+        log.info(f"Few-shot Epoch {ep+1} took {time.time() - ep_start:.2f}s")
+    log.info(f"Total few-shot fine-tuning took {time.time() - fs_start:.2f}s")
 
     # Unfreeze
     for p in model.backbone.parameters():
@@ -383,12 +404,14 @@ def few_shot_finetune(
     )
     ev = BasinEvaluator(target_basin)
     model.eval()
+    fs_eval_start = time.time()
     with torch.no_grad():
-        for batch in test_loader:
+        for batch in tqdm(test_loader, desc="Few-shot Eval", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
             ev.update(batch, out)
+    log.info(f"Few-shot evaluation took {time.time() - fs_eval_start:.2f}s")
 
     return ev.compute()
 
@@ -401,13 +424,7 @@ def run_lobo_benchmark(args):
     Trains all methods × all LOBO splits.
     Results saved to args.output_dir/benchmark_results.json.
     """
-    # Auto-select best available device: CUDA > MPS (Apple Silicon) > CPU
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = select_device(args)
     log.info(f"Device: {device}")
 
     if args.output_dir:
@@ -421,8 +438,10 @@ def run_lobo_benchmark(args):
 
     all_results = []
 
-    for split in splits:
-        for method_name in methods:
+    bench_start = time.time()
+    for split in tqdm(splits, desc="LOBO Splits", dynamic_ncols=True):
+        for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True):
+            exp_start = time.time()
             run_id = f"{method_name}_{split['target']}"
             try:
                 result = train_one_experiment(
@@ -436,7 +455,8 @@ def run_lobo_benchmark(args):
                 all_results.append(result)
                 log.info(
                     f"✓ {run_id}: acc_int={result['final_acc_int']:.3f} "
-                    f"ri_f1={result['final_ri_f1']:.3f}"
+                    f"ri_f1={result['final_ri_f1']:.3f} "
+                    f"[Took {time.time() - exp_start:.2f}s]"
                 )
             except Exception as e:
                 log.error(f"✗ {run_id} FAILED: {e}")
@@ -452,6 +472,7 @@ def run_lobo_benchmark(args):
 
     # Print summary table
     _print_summary_table(all_results, methods, splits)
+    log.info(f"LOBO Benchmark total time: {time.time() - bench_start:.2f}s")
 
     return all_results
 
@@ -489,11 +510,98 @@ def _print_summary_table(results, methods, splits):
     print("=" * 90)
 
 
+# ── Incremental Benchmark ─────────────────────────────────────────────────────
+
+def run_incremental_benchmark(args):
+    """
+    Incremental training benchmark.
+    For a target basin, trains on 1 source basin, then 2, then 3, up to
+    leave-one-basin-out (LOBO) setup.
+    """
+    device = select_device(args)
+    log.info(f"Device: {device}")
+
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    methods = args.methods.split(",") if args.methods else list(METHOD_REGISTRY.keys())
+    
+    # Target basins
+    targets = [args.target_basin] if args.target_basin else BASIN_CODES
+    
+    all_results = []
+    
+    bench_start = time.time()
+    for target in tqdm(targets, desc="Incremental Targets", dynamic_ncols=True):
+        if args.source_basins:
+            available_sources = args.source_basins.split(",")
+        else:
+            available_sources = [b for b in BASIN_CODES if b != target]
+            
+        # Iteration sequence: 1 source, 2 sources, ..., N sources
+        for i in tqdm(range(1, len(available_sources) + 1), desc="Incremental Sources", leave=False, dynamic_ncols=True):
+            source_basins = available_sources[:i]
+            
+            for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True):
+                exp_start = time.time()
+                run_id = f"{method_name}_{target}_src{i}"
+                try:
+                    result = train_one_experiment(
+                        args=args,
+                        source_basins=source_basins,
+                        target_basin=target,
+                        method_name=method_name,
+                        run_id=run_id,
+                        device=device,
+                    )
+                    all_results.append(result)
+                    log.info(
+                        f"✓ {run_id}: acc_int={result['final_acc_int']:.3f} "
+                        f"ri_f1={result['final_ri_f1']:.3f} "
+                        f"[Took {time.time() - exp_start:.2f}s]"
+                    )
+                except Exception as e:
+                    log.error(f"✗ {run_id} FAILED: {e}")
+                    if args.fail_fast:
+                        raise
+
+    # Save results
+    if args.output_dir:
+        out_path = Path(args.output_dir) / "incremental_results.json"
+        with open(out_path, "w") as f:
+            json.dump(all_results, f, indent=2, default=str)
+        log.info(f"Incremental results saved to {out_path}")
+        
+    log.info(f"Incremental Benchmark total time: {time.time() - bench_start:.2f}s")
+    return all_results
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
+    description = """
+\033[1;36m=================================================================\033[0m
+\033[1;35m    PhysIRM: Physics-Guided Basin Generalization Benchmark       \033[0m
+\033[1;36m=================================================================\033[0m
+
+\033[1mTrain AI to predict Tropical Cyclones and test generalization across oceans!\033[0m
+
+\033[1;33mMODES OF OPERATION:\033[0m
+  \033[1;32m1. single\033[0m       Train on a fixed set of source basins, test on 1 target.
+                  \033[3mUsage:\033[0m --mode single --source_basins WP,NA --target_basin SI --method physirm
+
+  \033[1;32m2. incremental\033[0m  Progressively iterate by adding 1 basin at a time to training.
+                  \033[3mUsage:\033[0m --mode incremental --source_basins WP,NA,EP --target_basin SI --methods physirm
+
+  \033[1;32m3. lobo\033[0m         (Leave-One-Basin-Out) Train on all basins except the target.
+                  \033[3mUsage:\033[0m --mode lobo --methods physirm --target_basin SI
+
+\033[1;33mAVAILABLE METHODS:\033[0m
+  \033[1;34merm, irm, vrex, coral, dann, maml, physirm\033[0m
+"""
     p = argparse.ArgumentParser(
-        description="Basin Generalization Benchmark for Tropical Cyclone Prediction"
+        description=description,
+        formatter_class=argparse.RawTextHelpFormatter
     )
 
     # Data
@@ -501,11 +609,12 @@ def parse_args():
                    help="Path to TCND root directory")
     p.add_argument("--output_dir", type=str, default="./runs",
                    help="Directory for checkpoints and results")
-    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--num_workers", type=int, default=4,
+                   help="Number of dataloader workers for data loading")
 
     # Experiment
-    p.add_argument("--mode", choices=["lobo", "single"], default="lobo",
-                   help="lobo=leave-one-basin-out; single=one transfer pair")
+    p.add_argument("--mode", choices=["lobo", "single", "incremental"], default="lobo",
+                   help="lobo=leave-one-basin-out; single=one transfer pair; incremental=incremental source basins")
     p.add_argument("--source_basins", type=str, default=None,
                    help="Comma-separated source basin codes (single mode)")
     p.add_argument("--target_basin", type=str, default=None,
@@ -514,19 +623,28 @@ def parse_args():
                    help="Single method for single mode (e.g. physirm)")
     p.add_argument("--methods", type=str, default=None,
                    help="Comma-separated methods to run (default: all)")
-    p.add_argument("--epochs",      type=int,   default=50)
-    p.add_argument("--eval_every",  type=int,   default=1)
+    p.add_argument("--epochs",      type=int,   default=50,
+                   help="Number of training epochs")
+    p.add_argument("--eval_every",  type=int,   default=1,
+                   help="Evaluate validation set every N epochs")
     p.add_argument("--device",      type=str,   default="auto",
                         help="Device: cuda | mps | cpu | auto (auto-detects best)")
-    p.add_argument("--fail_fast",   action="store_true")
+    p.add_argument("--fail_fast",   action="store_true",
+                   help="Crash immediately if one specific experiment configuration fails")
 
     # Model architecture
-    p.add_argument("--spatial_embed", type=int, default=256)
-    p.add_argument("--track_embed",   type=int, default=64)
-    p.add_argument("--env_embed",     type=int, default=128)
-    p.add_argument("--phys_dim",      type=int, default=64)
-    p.add_argument("--final_dim",     type=int, default=256)
-    p.add_argument("--dropout",       type=float, default=0.1)
+    p.add_argument("--spatial_embed", type=int, default=256,
+                   help="Embedding dimension for Data_3d branch")
+    p.add_argument("--track_embed",   type=int, default=64,
+                   help="Embedding dimension for Data_1d track branch")
+    p.add_argument("--env_embed",     type=int, default=128,
+                   help="Embedding dimension for Env-Data branch")
+    p.add_argument("--phys_dim",      type=int, default=64,
+                   help="Dimension of the invariant physics sub-space (z_phys)")
+    p.add_argument("--final_dim",     type=int, default=256,
+                   help="Dimension of the fused representation space")
+    p.add_argument("--dropout",       type=float, default=0.1,
+                   help="Dropout probability across networks")
 
     # Ablations
     p.add_argument("--no_3d",  action="store_true",
@@ -535,9 +653,12 @@ def parse_args():
                    help="Ablation: disable Env-Data branch")
 
     # Few-shot
-    p.add_argument("--few_shot",      action="store_true")
-    p.add_argument("--k_shots",       type=int,   default=32)
-    p.add_argument("--few_shot_epochs", type=int, default=5)
+    p.add_argument("--few_shot",      action="store_true",
+                   help="Enable few-shot fine-tuning on the target basin")
+    p.add_argument("--k_shots",       type=int,   default=32,
+                   help="Number of labeled examples to use for few-shot adaptation")
+    p.add_argument("--few_shot_epochs", type=int, default=5,
+                   help="Number of epochs to train during few-shot adaptation")
 
     return p.parse_args()
 
@@ -548,17 +669,14 @@ if __name__ == "__main__":
     if args.mode == "lobo":
         run_lobo_benchmark(args)
 
+    elif args.mode == "incremental":
+        run_incremental_benchmark(args)
+
     elif args.mode == "single":
         if not args.source_basins or not args.target_basin:
             raise ValueError("--source_basins and --target_basin required in single mode")
         source = args.source_basins.split(",")
-        # Auto-select best available device: CUDA > MPS (Apple Silicon) > CPU
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
+        device = select_device(args)
 
         methods = [args.method] if args.method else list(METHOD_REGISTRY.keys())
         for method_name in methods:
@@ -574,3 +692,28 @@ if __name__ == "__main__":
                 f"Final: acc_int={result['final_acc_int']:.3f} "
                 f"ri_f1={result['final_ri_f1']:.3f}"
             )
+
+            # ── Few-shot fine-tuning on target basin (if enabled) ─────────
+            if args.few_shot:
+                # Load the best checkpoint if one was saved
+                if result.get("best_ckpt"):
+                    model = build_model(args).to(device)
+                    model.load_state_dict(
+                        torch.load(result["best_ckpt"], map_location=device)
+                    )
+                else:
+                    model = build_model(args).to(device)
+
+                fs_result = few_shot_finetune(
+                    model=model,
+                    target_basin=args.target_basin,
+                    args=args,
+                    device=device,
+                    k_shots=args.k_shots,
+                    ft_epochs=args.few_shot_epochs,
+                )
+                log.info(
+                    f"Few-shot ({args.k_shots} shots): "
+                    f"acc_int={fs_result.accuracy_int:.3f} "
+                    f"ri_f1={fs_result.ri_f1:.3f}"
+                )

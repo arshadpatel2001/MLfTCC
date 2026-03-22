@@ -7,7 +7,7 @@ Implements the three-branch multimodal encoder matching the TCNM architecture
 Architecture:
   Branch 1: 3D-CNN Encoder  ← Data_3d (13, 81, 81)
   Branch 2: MLP Encoder     ← Data_1d (4,)
-  Branch 3: Env-T-Net       ← Env-Data (46,)
+  Branch 3: Env-T-Net       ← Env-Data (77,)
   Fusion:   Feature concat + projection → representation z ∈ R^d
 
 For PhysIRM, the final representation is split into:

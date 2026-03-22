@@ -25,6 +25,13 @@ import copy
 from typing import Dict, List, Optional, Tuple
 from abc import ABC, abstractmethod
 
+import time
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(x, **kwargs): return x
+from abc import ABC, abstractmethod
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -347,9 +354,9 @@ class DANN(DGMethod):
         }
 
     def update(self, optimizer, batches, model, step=0):
-        # Also include discriminator parameters in optimisation
-        # (caller should create a joint optimizer or pass disc params separately)
-        self._step = step
+        # Discriminator parameters should be included in the joint optimizer
+        # (caller creates a joint optimizer with disc params included).
+        # _step is managed internally by compute_loss(); do NOT overwrite it.
         optimizer.zero_grad()
         loss, metrics = self.compute_loss(batches, model)
         loss.backward()
@@ -396,7 +403,8 @@ class MAML(DGMethod):
         # FOMAML: compute gradients, create adapted params manually
         fast_weights = {n: p.clone() for n, p in model.named_parameters()}
 
-        for _ in range(self.inner_steps):
+        inner_start = time.time()
+        for _ in tqdm(range(self.inner_steps), desc="MAML Inner", leave=False, dynamic_ncols=True):
             # Forward with fast weights
             out  = self._forward_with_weights(model, support_batch, fast_weights)
             loss = task_loss(out["logits_intensity"], out["logits_direction"],
@@ -408,6 +416,9 @@ class MAML(DGMethod):
                 n: p - self.inner_lr * (g if g is not None else torch.zeros_like(p))
                 for (n, p), g in zip(fast_weights.items(), grads)
             }
+            
+        import logging
+        logging.getLogger(__name__).debug(f"MAML inner loop took {time.time() - inner_start:.4f}s")
 
         return fast_weights
 
@@ -433,8 +444,10 @@ class MAML(DGMethod):
             n  = batch["data_1d"].shape[0]
             n_s = n // 2
 
-            support = {k: v[:n_s] for k, v in batch.items()}
-            query   = {k: v[n_s:] for k, v in batch.items()}
+            support = {k: (v[:n_s] if isinstance(v, torch.Tensor) else v)
+                       for k, v in batch.items()}
+            query   = {k: (v[n_s:] if isinstance(v, torch.Tensor) else v)
+                       for k, v in batch.items()}
 
             fast_w = self._inner_loop(model, support)
             # Query loss with adapted weights
@@ -609,7 +622,7 @@ class PhysIRM(DGMethod):
         }
 
     def update(self, optimizer, batches, model, step=0):
-        self._step = step
+        # _step is managed internally by compute_loss(); do NOT overwrite it.
         optimizer.zero_grad()
         loss, metrics = self.compute_loss(batches, model)
         loss.backward()
