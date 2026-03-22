@@ -131,6 +131,50 @@ def train_one_experiment(
     device: torch.device,
 ) -> Dict:
     """
+    Wrapper for training one experiment that ensures all output is logged uniquely.
+    """
+    run_timestamp = getattr(args, "run_timestamp", time.strftime("%Y%m%d_%H%M%S"))
+    exp_log_dir = Path("logs") / "experiments" / run_timestamp
+    exp_log_dir.mkdir(parents=True, exist_ok=True)
+    exp_log_file = exp_log_dir / f"{run_id}.log"
+    
+    exp_fh = logging.FileHandler(exp_log_file)
+    exp_fh.setLevel(logging.INFO)
+    exp_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    
+    root_logger = logging.getLogger()
+    root_logger.addHandler(exp_fh)
+    
+    try:
+        log.info("=" * 80)
+        log.info(f"[{run_id}] EXPERIMENT START")
+        log.info(f"[{run_id}] Source: {source_basins}  Target: {target_basin}  Method: {method_name}")
+        log.info(f"[{run_id}] Device: {device}")
+        log.info(f"[{run_id}] Isolated log file: {exp_log_file}")
+        log.info("Experiment Hyperparameters & Args:")
+        for k, v in sorted(vars(args).items()):
+            log.info(f"  {k}: {v}")
+        log.info("=" * 80)
+        
+        return _train_one_experiment_inner(args, source_basins, target_basin, method_name, run_id, device)
+    except Exception as e:
+        log.error(f"[{run_id}] EXPERIMENT FAILED: {e}")
+        raise
+    finally:
+        log.info(f"[{run_id}] EXPERIMENT END")
+        log.info("=" * 80)
+        root_logger.removeHandler(exp_fh)
+        exp_fh.close()
+
+def _train_one_experiment_inner(
+    args,
+    source_basins: List[str],
+    target_basin: str,
+    method_name: str,
+    run_id: str,
+    device: torch.device,
+) -> Dict:
+    """
     Train one (source, target, method) triple.
     Returns metrics dict for logging.
     """
@@ -298,6 +342,7 @@ def train_one_experiment(
                     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
                     ckpt_path = Path(args.output_dir) / f"{run_id}_best.pt"
                     state = {
+                        "epoch": epoch,
                         "model": model.state_dict(),
                         "method": method.state_dict() if isinstance(method, torch.nn.Module) else {}
                     }
@@ -312,6 +357,16 @@ def train_one_experiment(
                 **epoch_metrics,
             })
 
+        # Save the latest weights at the end of every epoch
+        if args.output_dir:
+            Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+            latest_ckpt_path = Path(args.output_dir) / f"{run_id}_latest.pt"
+            latest_state = {
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "method": method.state_dict() if isinstance(method, torch.nn.Module) else {}
+            }
+            torch.save(latest_state, latest_ckpt_path)
     # ── Final evaluation ──────────────────────────────────────────────────────
     if best_ckpt:
         log.info(f"Loading best checkpoint: {best_ckpt}")
@@ -638,7 +693,7 @@ def run_incremental_benchmark(args):
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    description = """
+    description = f"""
 \033[1;36m=================================================================\033[0m
 \033[1;35m    PhysIRM: Physics-Guided Basin Generalization Benchmark       \033[0m
 \033[1;36m=================================================================\033[0m
@@ -654,6 +709,9 @@ def parse_args():
 
   \033[1;32m3. lobo\033[0m         (Leave-One-Basin-Out) Train on all basins except the target.
                   \033[3mUsage:\033[0m --mode lobo --methods physirm --target_basin SI
+
+\033[1;33mAVAILABLE BASINS:\033[0m
+  \033[1;34m{', '.join(BASIN_CODES)}\033[0m
 
 \033[1;33mAVAILABLE METHODS:\033[0m
   \033[1;34merm, irm, vrex, coral, dann, maml, physirm\033[0m
@@ -724,6 +782,33 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # ── Setup Global Logging ──────────────────────────────────────────────────
+    import platform
+    log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    args.run_timestamp = timestamp
+    
+    global_log_file = log_dir / f"train_run_{args.mode}_{timestamp}.log"
+    fh = logging.FileHandler(global_log_file)
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logging.getLogger().addHandler(fh)
+    
+    log.info("=" * 80)
+    log.info("STARTING FULL TRAINING RUN")
+    log.info(f"Mode: {args.mode}")
+    log.info(f"Timestamp: {timestamp}")
+    log.info(f"Command: {' '.join(sys.argv)}")
+    log.info("System Environment:")
+    log.info(f"  OS: {platform.system()} {platform.release()} ({platform.machine()})")
+    log.info(f"  Python: {sys.version.split()[0]}")
+    log.info(f"  PyTorch: {torch.__version__}")
+    log.info("Arguments:")
+    for k, v in sorted(vars(args).items()):
+        log.info(f"  {k}: {v}")
+    log.info("=" * 80)
 
     if args.mode == "lobo":
         run_lobo_benchmark(args)
