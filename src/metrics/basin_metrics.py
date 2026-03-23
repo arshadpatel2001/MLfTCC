@@ -62,12 +62,17 @@ class BasinResult:
     """Per-basin evaluation result."""
     basin:        str
     n_samples:    int
-    accuracy_int: float  # intensity accuracy
-    accuracy_dir: float  # direction accuracy
-    f1_int:       float  # weighted F1 for intensity
-    ri_recall:    float  # recall on RI class (class 4)
-    ri_precision: float
-    ri_f1:        float
+    accuracy_intensity: float  # intensity accuracy
+    precision_intensity: float
+    recall_intensity: float
+    f1_intensity:       float  # weighted F1 for intensity
+    accuracy_direction: float  # direction accuracy
+    precision_direction: float
+    recall_direction: float
+    f1_direction: float
+    rapid_intensification_recall:    float  # recall on RI class (class 4)
+    rapid_intensification_precision: float
+    rapid_intensification_f1:        float
 
 
 @dataclass
@@ -78,13 +83,25 @@ class TransferResult:
     method:         str
 
     # In-basin (source) performance
-    source_acc_int: float
-    source_acc_dir: float
+    source_accuracy_intensity: float
+    source_precision_intensity: float
+    source_recall_intensity: float
+    source_f1_intensity: float
+    source_accuracy_direction: float
+    source_precision_direction: float
+    source_recall_direction: float
+    source_f1_direction: float
 
     # Zero-shot target performance
-    target_acc_int:   float
-    target_acc_dir:   float
-    target_ri_f1:     float
+    target_accuracy_intensity:   float
+    target_precision_intensity: float
+    target_recall_intensity: float
+    target_f1_intensity: float
+    target_accuracy_direction:   float
+    target_precision_direction: float
+    target_recall_direction: float
+    target_f1_direction: float
+    target_rapid_intensification_f1:     float
 
     # Proposed metrics
     btg:   float  # Basin Transfer Gap
@@ -101,14 +118,14 @@ def accuracy(preds: np.ndarray, labels: np.ndarray) -> float:
     return float((preds == labels).mean())
 
 
-def weighted_f1(preds: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
-    """Weighted F1 score (weighted by class support / frequency)."""
+def weighted_metrics(preds: np.ndarray, labels: np.ndarray, n_classes: int) -> Tuple[float, float, float]:
+    """Weighted Precision, Recall, and F1 score (weighted by class support / frequency)."""
     from collections import Counter
-    if len(labels) == 0: return 0.0
+    if len(labels) == 0: return 0.0, 0.0, 0.0
     support = Counter(labels)
     total   = len(labels)
 
-    f1s, weights = [], []
+    precs, recs, f1s, weights = [], [], [], []
     for c in range(n_classes):
         tp = float(((preds == c) & (labels == c)).sum())
         fp = float(((preds == c) & (labels != c)).sum())
@@ -116,10 +133,13 @@ def weighted_f1(preds: np.ndarray, labels: np.ndarray, n_classes: int) -> float:
         prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+        
+        precs.append(prec)
+        recs.append(rec)
         f1s.append(f1)
         weights.append(support[c] / total)
 
-    return float(np.dot(f1s, weights))
+    return float(np.dot(precs, weights)), float(np.dot(recs, weights)), float(np.dot(f1s, weights))
 
 
 def ri_metrics(preds: np.ndarray, labels: np.ndarray) -> Tuple[float, float, float]:
@@ -263,8 +283,9 @@ class BasinEvaluator:
             # than crashing with NaN from numpy mean on an empty array.
             return BasinResult(
                 basin=self.basin_name, n_samples=0,
-                accuracy_int=0.0, accuracy_dir=0.0, f1_int=0.0,
-                ri_recall=0.0, ri_precision=0.0, ri_f1=0.0,
+                accuracy_intensity=0.0, precision_intensity=0.0, recall_intensity=0.0, f1_intensity=0.0,
+                accuracy_direction=0.0, precision_direction=0.0, recall_direction=0.0, f1_direction=0.0,
+                rapid_intensification_recall=0.0, rapid_intensification_precision=0.0, rapid_intensification_f1=0.0,
             )
         pi = np.array(self._preds_int)
         li = np.array(self._labels_int)
@@ -272,16 +293,23 @@ class BasinEvaluator:
         ld = np.array(self._labels_dir)
 
         ri_p, ri_r, ri_f = ri_metrics(pi, li)
+        pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=5)
+        pd_p, pd_r, pd_f = weighted_metrics(pd, ld, n_classes=8)
 
         return BasinResult(
             basin        = self.basin_name,
             n_samples    = len(pi),
-            accuracy_int = accuracy(pi, li),
-            accuracy_dir = accuracy(pd, ld),
-            f1_int       = weighted_f1(pi, li, n_classes=5),
-            ri_recall    = ri_r,
-            ri_precision = ri_p,
-            ri_f1        = ri_f,
+            accuracy_intensity = accuracy(pi, li),
+            precision_intensity = pi_p,
+            recall_intensity = pi_r,
+            f1_intensity       = pi_f,
+            accuracy_direction = accuracy(pd, ld),
+            precision_direction = pd_p,
+            recall_direction = pd_r,
+            f1_direction       = pd_f,
+            rapid_intensification_recall    = ri_r,
+            rapid_intensification_precision = ri_p,
+            rapid_intensification_f1        = ri_f,
         )
 
     def get_features(self) -> Optional[torch.Tensor]:
@@ -336,7 +364,8 @@ class TransferEvaluator:
         model.to(device)
 
         # ── Source performance ────────────────────────────────────────────────
-        source_accs_int, source_accs_dir = [], []
+        source_accs_int, source_precs_int, source_recs_int, source_f1s_int = [], [], [], []
+        source_accs_dir, source_precs_dir, source_recs_dir, source_f1s_dir = [], [], [], []
         source_basins = list(source_loaders.keys())
         per_basin_results = {}
 
@@ -351,11 +380,23 @@ class TransferEvaluator:
                     ev.update(batch, out)
             r = ev.compute()
             per_basin_results[basin] = r
-            source_accs_int.append(r.accuracy_int)
-            source_accs_dir.append(r.accuracy_dir)
+            source_accs_int.append(r.accuracy_intensity)
+            source_precs_int.append(r.precision_intensity)
+            source_recs_int.append(r.recall_intensity)
+            source_f1s_int.append(r.f1_intensity)
+            source_accs_dir.append(r.accuracy_direction)
+            source_precs_dir.append(r.precision_direction)
+            source_recs_dir.append(r.recall_direction)
+            source_f1s_dir.append(r.f1_direction)
 
         source_acc_int = float(np.mean(source_accs_int))
+        source_prec_int = float(np.mean(source_precs_int))
+        source_rec_int = float(np.mean(source_recs_int))
+        source_f1_int = float(np.mean(source_f1s_int))
         source_acc_dir = float(np.mean(source_accs_dir))
+        source_prec_dir = float(np.mean(source_precs_dir))
+        source_rec_dir = float(np.mean(source_recs_dir))
+        source_f1_dir = float(np.mean(source_f1s_dir))
 
         # ── Target zero-shot performance ──────────────────────────────────────
         target_ev = BasinEvaluator(target_basin)
@@ -373,20 +414,32 @@ class TransferEvaluator:
         log.info(f"Cross-basin evaluation for {target_basin} took {time.time() - eval_start:.2f}s")
 
         # ── Proposed metrics ──────────────────────────────────────────────────
-        btg  = basin_transfer_gap(source_acc_int, target_r.accuracy_int)
+        btg  = basin_transfer_gap(source_acc_int, target_r.accuracy_intensity)
         bnte = basin_normalized_transfer_efficiency(
-            source_acc_int, target_r.accuracy_int, baseline_target_acc
+            source_acc_int, target_r.accuracy_intensity, baseline_target_acc
         )
 
         result = TransferResult(
             source_basins   = source_basins,
             target_basin    = target_basin,
             method          = self.method_name,
-            source_acc_int  = source_acc_int,
-            source_acc_dir  = source_acc_dir,
-            target_acc_int  = target_r.accuracy_int,
-            target_acc_dir  = target_r.accuracy_dir,
-            target_ri_f1    = target_r.ri_f1,
+            source_accuracy_intensity  = source_acc_int,
+            source_precision_intensity = source_prec_int,
+            source_recall_intensity    = source_rec_int,
+            source_f1_intensity        = source_f1_int,
+            source_accuracy_direction  = source_acc_dir,
+            source_precision_direction = source_prec_dir,
+            source_recall_direction    = source_rec_dir,
+            source_f1_direction        = source_f1_dir,
+            target_accuracy_intensity  = target_r.accuracy_intensity,
+            target_precision_intensity = target_r.precision_intensity,
+            target_recall_intensity    = target_r.recall_intensity,
+            target_f1_intensity        = target_r.f1_intensity,
+            target_accuracy_direction  = target_r.accuracy_direction,
+            target_precision_direction = target_r.precision_direction,
+            target_recall_direction    = target_r.recall_direction,
+            target_f1_direction        = target_r.f1_direction,
+            target_rapid_intensification_f1    = target_r.rapid_intensification_f1,
             btg             = btg,
             bnte            = bnte,
             per_basin       = per_basin_results,
@@ -411,8 +464,8 @@ class TransferEvaluator:
         for r in rs:
             print(
                 f"{r.method:<12} {r.target_basin:<6} "
-                f"{r.target_acc_int:>8.3f} {r.target_acc_dir:>8.3f} "
-                f"{r.target_ri_f1:>7.3f} {r.btg:>8.3f} {r.bnte:>8.3f}"
+                f"{r.target_accuracy_intensity:>8.3f} {r.target_accuracy_direction:>8.3f} "
+                f"{r.target_rapid_intensification_f1:>7.3f} {r.btg:>8.3f} {r.bnte:>8.3f}"
             )
         print(sep)
 
@@ -422,9 +475,15 @@ class TransferEvaluator:
                 "method": r.method,
                 "source": r.source_basins,
                 "target": r.target_basin,
-                "acc_int": r.target_acc_int,
-                "acc_dir": r.target_acc_dir,
-                "ri_f1":   r.target_ri_f1,
+                "target accuracy intensity": r.target_accuracy_intensity,
+                "target precision intensity": r.target_precision_intensity,
+                "target recall intensity": r.target_recall_intensity,
+                "target f1 intensity": r.target_f1_intensity,
+                "target accuracy direction": r.target_accuracy_direction,
+                "target precision direction": r.target_precision_direction,
+                "target recall direction": r.target_recall_direction,
+                "target f1 direction": r.target_f1_direction,
+                "target rapid intensification f1":   r.target_rapid_intensification_f1,
                 "btg":     r.btg,
                 "bnte":    r.bnte,
             }

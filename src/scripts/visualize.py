@@ -68,7 +68,7 @@ METHOD_LABELS = {
 
 def plot_transfer_matrix(
     directed_results: List[dict],
-    metric: str = "final_acc_int",
+    metric: str = "final target accuracy intensity",
     method: str = "physirm",
     output_path: Optional[str] = None,
 ):
@@ -144,7 +144,7 @@ def plot_ri_comparison(
         m = r.get("method")
         b = r.get("target_basin")
         if m in data and b in data[m]:
-            data[m][b] = r.get("final_ri_f1", 0.0)
+            data[m][b] = r.get("final target rapid intensification f1", 0.0)
 
     if not HAS_MPL:
         print("\nRI-F1 per target basin:")
@@ -295,7 +295,7 @@ def plot_tsne_physics(
 
 def generate_latex_table(
     lobo_results: List[dict],
-    metric: str = "final_acc_int",
+    metric: str = "final target accuracy intensity",
     caption: str = "Leave-One-Basin-Out Zero-Shot Transfer",
     label: str = "tab:lobo",
 ) -> str:

@@ -329,15 +329,34 @@ def _train_one_experiment_inner(
 
             log.info(
                 f"Epoch {epoch:3d}/{args.epochs} "
-                f"| src_acc_int={r_src.accuracy_int:.3f} "
-                f"| tgt_acc_int={r_tgt.accuracy_int:.3f} "
-                f"| tgt_ri_f1={r_tgt.ri_f1:.3f} "
+                f"| source accuracy intensity={r_src.accuracy_intensity:.3f} "
+                f"| source precision intensity={r_src.precision_intensity:.3f} "
+                f"| source recall intensity={r_src.recall_intensity:.3f} "
+                f"| source f1 intensity={r_src.f1_intensity:.3f} "
+                f"| source accuracy direction={r_src.accuracy_direction:.3f} "
+                f"| source precision direction={r_src.precision_direction:.3f} "
+                f"| source recall direction={r_src.recall_direction:.3f} "
+                f"| source f1 direction={r_src.f1_direction:.3f} "
+                f"| source rapid intensification recall={r_src.rapid_intensification_recall:.3f} "
+                f"| source rapid intensification precision={r_src.rapid_intensification_precision:.3f} "
+                f"| source rapid intensification f1={r_src.rapid_intensification_f1:.3f} "
+                f"| target accuracy intensity={r_tgt.accuracy_intensity:.3f} "
+                f"| target precision intensity={r_tgt.precision_intensity:.3f} "
+                f"| target recall intensity={r_tgt.recall_intensity:.3f} "
+                f"| target f1 intensity={r_tgt.f1_intensity:.3f} "
+                f"| target accuracy direction={r_tgt.accuracy_direction:.3f} "
+                f"| target precision direction={r_tgt.precision_direction:.3f} "
+                f"| target recall direction={r_tgt.recall_direction:.3f} "
+                f"| target f1 direction={r_tgt.f1_direction:.3f} "
+                f"| target rapid intensification recall={r_tgt.rapid_intensification_recall:.3f} "
+                f"| target rapid intensification precision={r_tgt.rapid_intensification_precision:.3f} "
+                f"| target rapid intensification f1={r_tgt.rapid_intensification_f1:.3f} "
                 f"| loss={epoch_metrics.get('loss', float('nan')):.4f}"
             )
 
             # Track best on SOURCE val (to avoid target leakage)
-            if r_src.accuracy_int > best_val_acc:
-                best_val_acc = r_src.accuracy_int
+            if r_src.accuracy_intensity > best_val_acc:
+                best_val_acc = r_src.accuracy_intensity
                 if args.output_dir:
                     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
                     ckpt_path = Path(args.output_dir) / f"{run_id}_best.pt"
@@ -351,9 +370,28 @@ def _train_one_experiment_inner(
 
             history.append({
                 "epoch": epoch,
-                "src_acc_int": r_src.accuracy_int,
-                "tgt_acc_int": r_tgt.accuracy_int,
-                "tgt_ri_f1":   r_tgt.ri_f1,
+                "source accuracy intensity": r_src.accuracy_intensity,
+                "source precision intensity": r_src.precision_intensity,
+                "source recall intensity": r_src.recall_intensity,
+                "source f1 intensity": r_src.f1_intensity,
+                "source accuracy direction": r_src.accuracy_direction,
+                "source precision direction": r_src.precision_direction,
+                "source recall direction": r_src.recall_direction,
+                "source f1 direction": r_src.f1_direction,
+                "source rapid intensification recall": r_src.rapid_intensification_recall,
+                "source rapid intensification precision": r_src.rapid_intensification_precision,
+                "source rapid intensification f1": r_src.rapid_intensification_f1,
+                "target accuracy intensity": r_tgt.accuracy_intensity,
+                "target precision intensity": r_tgt.precision_intensity,
+                "target recall intensity": r_tgt.recall_intensity,
+                "target f1 intensity": r_tgt.f1_intensity,
+                "target accuracy direction": r_tgt.accuracy_direction,
+                "target precision direction": r_tgt.precision_direction,
+                "target recall direction": r_tgt.recall_direction,
+                "target f1 direction": r_tgt.f1_direction,
+                "target rapid intensification recall": r_tgt.rapid_intensification_recall,
+                "target rapid intensification precision": r_tgt.rapid_intensification_precision,
+                "target rapid intensification f1": r_tgt.rapid_intensification_f1,
                 **epoch_metrics,
             })
 
@@ -399,10 +437,17 @@ def _train_one_experiment_inner(
         "method":        method_name,
         "source_basins": source_basins,
         "target_basin":  target_basin,
-        "final_acc_int": final.accuracy_int,
-        "final_acc_dir": final.accuracy_dir,
-        "final_ri_f1":   final.ri_f1,
-        "final_ri_recall": final.ri_recall,
+        "final target accuracy intensity": final.accuracy_intensity,
+        "final target precision intensity": final.precision_intensity,
+        "final target recall intensity": final.recall_intensity,
+        "final target f1 intensity": final.f1_intensity,
+        "final target accuracy direction": final.accuracy_direction,
+        "final target precision direction": final.precision_direction,
+        "final target recall direction": final.recall_direction,
+        "final target f1 direction": final.f1_direction,
+        "final target rapid intensification precision": final.rapid_intensification_precision,
+        "final target rapid intensification recall": final.rapid_intensification_recall,
+        "final target rapid intensification f1": final.rapid_intensification_f1,
         "history":       history,
         "best_ckpt":     best_ckpt,
     }
@@ -417,9 +462,34 @@ def _train_one_experiment_inner(
             k_shots=args.k_shots,
             ft_epochs=args.few_shot_epochs,
         )
-        result["few_shot_acc_int"] = fs_result.accuracy_int
-        result["few_shot_ri_f1"] = fs_result.ri_f1
-        log.info(f"Few-shot ({args.k_shots} shots) on {target_basin}: acc={fs_result.accuracy_int:.3f}, ri_f1={fs_result.ri_f1:.3f}")
+        result["few_shot target accuracy intensity"] = fs_result.accuracy_intensity
+        result["few_shot target precision intensity"] = fs_result.precision_intensity
+        result["few_shot target recall intensity"] = fs_result.recall_intensity
+        result["few_shot target f1 intensity"] = fs_result.f1_intensity
+        
+        result["few_shot target accuracy direction"] = fs_result.accuracy_direction
+        result["few_shot target precision direction"] = fs_result.precision_direction
+        result["few_shot target recall direction"] = fs_result.recall_direction
+        result["few_shot target f1 direction"] = fs_result.f1_direction
+        
+        result["few_shot target rapid intensification precision"] = fs_result.rapid_intensification_precision
+        result["few_shot target rapid intensification recall"] = fs_result.rapid_intensification_recall
+        result["few_shot target rapid intensification f1"] = fs_result.rapid_intensification_f1
+        
+        log.info(
+            f"Few-shot ({args.k_shots} shots) on {target_basin}: "
+            f"target accuracy intensity={fs_result.accuracy_intensity:.3f}, "
+            f"target precision intensity={fs_result.precision_intensity:.3f}, "
+            f"target recall intensity={fs_result.recall_intensity:.3f}, "
+            f"target f1 intensity={fs_result.f1_intensity:.3f}, "
+            f"target accuracy direction={fs_result.accuracy_direction:.3f}, "
+            f"target precision direction={fs_result.precision_direction:.3f}, "
+            f"target recall direction={fs_result.recall_direction:.3f}, "
+            f"target f1 direction={fs_result.f1_direction:.3f}, "
+            f"target rapid intensification precision={fs_result.rapid_intensification_precision:.3f}, "
+            f"target rapid intensification recall={fs_result.rapid_intensification_recall:.3f}, "
+            f"target rapid intensification f1={fs_result.rapid_intensification_f1:.3f}"
+        )
 
     return result
 
@@ -567,8 +637,8 @@ def run_lobo_benchmark(args):
                 )
                 all_results.append(result)
                 log.info(
-                    f"✓ {run_id}: acc_int={result['final_acc_int']:.3f} "
-                    f"ri_f1={result['final_ri_f1']:.3f} "
+                    f"✓ {run_id}: final target accuracy intensity={result['final target accuracy intensity']:.3f} "
+                    f"final target rapid intensification f1={result['final target rapid intensification f1']:.3f} "
                     f"[Took {time.time() - exp_start:.2f}s]"
                 )
             except Exception as e:
@@ -611,7 +681,7 @@ def _print_summary_table(results, methods, splits):
                 None
             )
             if r:
-                acc = r["final_acc_int"]
+                acc = r["final target accuracy intensity"]
                 accs.append(acc)
                 row += f"{acc:>8.3f}"
             else:
@@ -670,8 +740,8 @@ def run_incremental_benchmark(args):
                     )
                     all_results.append(result)
                     log.info(
-                        f"✓ {run_id}: acc_int={result['final_acc_int']:.3f} "
-                        f"ri_f1={result['final_ri_f1']:.3f} "
+                        f"✓ {run_id}: final target accuracy intensity={result['final target accuracy intensity']:.3f} "
+                        f"final target rapid intensification f1={result['final target rapid intensification f1']:.3f} "
                         f"[Took {time.time() - exp_start:.2f}s]"
                     )
                 except Exception as e:
@@ -834,6 +904,6 @@ if __name__ == "__main__":
                 device=device,
             )
             log.info(
-                f"Final: acc_int={result['final_acc_int']:.3f} "
-                f"ri_f1={result['final_ri_f1']:.3f}"
+                f"Final: final target accuracy intensity={result['final target accuracy intensity']:.3f} "
+                f"final target rapid intensification f1={result['final target rapid intensification f1']:.3f}"
             )
