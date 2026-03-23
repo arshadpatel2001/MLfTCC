@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyclone Predictor Deep-Dive: From Physics to Prediction</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.5/dist/mermaid.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1e40af;
+            --secondary: #64748b;
+            --accent: #f59e0b;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --border: #e2e8f0;
+            --highlight-blue: #dbeafe;
+            --highlight-green: #dcfce7;
+            --highlight-red: #fee2e2;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 4rem 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 5rem;
+        }
+
+        h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            color: #0f172a;
+            letter-spacing: -0.025em;
+            margin-bottom: 1rem;
+        }
+
+        .subtitle {
+            font-size: 1.25rem;
+            color: var(--secondary);
+            font-weight: 400;
+        }
+
+        .section-card {
+            background: var(--card-bg);
+            border-radius: 1.5rem;
+            padding: 3rem;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+            margin-bottom: 3rem;
+            border: 1px solid var(--border);
+        }
+
+        h2 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            color: var(--primary);
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #334155;
+            margin-top: 2rem;
+        }
+
+        p { margin-bottom: 1.25rem; font-size: 1.05rem; }
+
+        .term-pill {
+            display: inline-block;
+            background: var(--highlight-blue);
+            color: var(--primary-dark);
+            padding: 0.2rem 0.6rem;
+            border-radius: 9999px;
+            font-weight: 600;
+            font-size: 0.9em;
+            margin-right: 0.25rem;
+        }
+
+        .mermaid {
+            background: #fff;
+            padding: 2rem;
+            border-radius: 1rem;
+            border: 1px solid var(--border);
+            margin: 2rem 0;
+            display: flex;
+            justify-content: center;
+        }
+
+        .glossary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .glossary-item {
+            background: #f1f5f9;
+            padding: 1.5rem;
+            border-radius: 1rem;
+        }
+
+        .glossary-item strong {
+            display: block;
+            color: var(--primary-dark);
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .ablation-box {
+            background: var(--highlight-green);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            border-left: 4px solid #16a34a;
+            margin: 1rem 0;
+        }
+
+        .critical-box {
+            background: var(--highlight-red);
+            padding: 1rem;
+            border-radius: 0.75rem;
+            border-left: 4px solid #dc2626;
+            margin: 1rem 0;
+        }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background: #e2e8f0;
+            padding: 0.2rem 0.4rem;
+            border-radius: 0.25rem;
+            font-size: 0.9em;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 4rem;
+            padding-bottom: 4rem;
+            color: var(--secondary);
+            font-size: 0.875rem;
+        }
+
+        .highlight-text { font-weight: 700; color: #0f172a; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌀 Cyclone Generalization Decoder</h1>
+            <p class="subtitle">An End-to-End Visual Guide to the Basin Generalisation Pipeline</p>
+        </header>
+
+        <!-- 1. DEFINITIONS -->
+        <section class="section-card">
+            <h2>📖 Core Concepts & Definitions</h2>
+            <p>Before we dive in, let's unlock the "ML jargon" used in this project:</p>
+            <div class="glossary-grid">
+                <div class="glossary-item">
+                    <strong>Basin</strong>
+                    A specific region of the ocean where cyclones form (e.g., North Atlantic, West Pacific). Each has its own climate "personality."
+                </div>
+                <div class="glossary-item">
+                    <strong>Generalisation</strong>
+                    The AI's ability to see a new ocean it never trained on and still predict accurately by applying universal principles.
+                </div>
+                <div class="glossary-item">
+                    <strong>Latent Space (z)</strong>
+                    The AI's "internal imagination." It converts raw data (images/numbers) into a compressed mathematical code that captures the essence of the storm.
+                </div>
+                <div class="glossary-item">
+                    <strong>Encoder</strong>
+                    A specialized neural network that translates one type of data (like a 3D weather image) into that internal mathematical code.
+                </div>
+                <div class="glossary-item">
+                    <strong>Invariance</strong>
+                    The idea that some things (like the physics of heat rising) work exactly the same way in the Atlantic as they do in the Indian Ocean.
+                </div>
+                <div class="glossary-item">
+                    <strong>Ablation</strong>
+                    A scientific "stress test" where we remove one part of the model's brain to see how much worse it gets. It proves if a new feature actually helps.
+                </div>
+            </div>
+        </section>
+
+        <!-- 2. END-TO-END FLOW -->
+        <section class="section-card">
+            <h2>⚙️ The Full End-to-End Pipeline</h2>
+            <p>This flowchart shows how raw weather data travels from the ocean sensors through the AI's brain into a 24-hour prediction.</p>
+            
+            <div class="mermaid">
+                graph TD
+                    subgraph Input_Stage [Data Collection]
+                        A1[3D Weather Cube] --> |Encoder_1| F1[Spatial Features]
+                        A2[1D Vital Signs] --> |Encoder_2| F2[Track Features]
+                        A3[Global Env Data] --> |Encoder_3| F3[Env Context]
+                        A4[Physics Params] --> |Encoder_4| F4[Physics Vector]
+                    end
+
+                    subgraph Interaction_Stage [The Brain - PhysIRM]
+                        F1 & F2 & F3 --> |Fusion| Z_Full[Master Latent Code]
+                        Z_Full --> Z_Env[z_env: Local Habits]
+                        Z_Full --> Z_Phys[z_phys: Universal Physics]
+                        F4 --> |Alignment| Z_Phys
+                    end
+
+                    subgraph Output_Stage [Prediction]
+                        Z_Env & Z_Phys --> |Decision Heads| FinalZ[Combined Wisdom]
+                        FinalZ --> P1{24h Intensity?}
+                        FinalZ --> P2{Predict Direction}
+                        
+                        P1 -->|Metric| M1[RI-F1 Score]
+                        P2 -->|Metric| M2[Direction Accuracy]
+                    end
+
+                    classDef blue fill:#dbeafe,stroke:#2563eb,stroke-width:2px;
+                    classDef green fill:#dcfce7,stroke:#16a34a,stroke-width:2px;
+                    classDef red fill:#fee2e2,stroke:#dc2626,stroke-width:2px;
+                    
+                    class A1,A2,A3,A4 blue;
+                    class Z_Full,Z_Env,Z_Phys green;
+                    class P1,P2,M1,M2 red;
+            </div>
+        </section>
+
+        <!-- 3. THE LOBO TEST -->
+        <section class="section-card">
+            <h2>🧪 The "LOBO" Transfer Strategy</h2>
+            <p>How do we know if our AI is truly "Generalised" and not just memorising one ocean?</p>
+            <div class="highlight-text">Leave-One-Basin-Out (LOBO) Test:</div>
+            <ol>
+                <li>We pick one basin (e.g., <strong>South Indian Ocean</strong>) to be the "Forbidden Ocean."</li>
+                <li>We hide it from the AI during training.</li>
+                <li>The AI trains on the other 5 basins (Atlantic, West Pacific, etc.).</li>
+                <li><strong>The Moment of Truth:</strong> We drop the AI into the South Indian Ocean for the first time. 
+                    If it predicts well, it has mastered the <i>physics</i> of storms, not just the <i>habits</i> of a single ocean.
+                </li>
+            </ol>
+            <div class="ablation-box">
+                <strong>Why this matters?</strong> As global warming changes current climate patterns, models that only know "habits" will break. Models that know "physics" will survive.
+            </div>
+        </section>
+
+        <!-- 4. ABLATION STUDIES -->
+        <section class="section-card">
+            <h2>🛠️ The Scientific Audit: Ablation Studies</h2>
+            <p>To prove our brain architecture (PhysIRM) is actually better than standard AI, we run "Scientific Stress Tests."</p>
+
+            <h3>Type A: Component Ablations (Mind Stress Tests)</h3>
+            <p>We intentionally "dumb down" the model to see if our special features are necessary:</p>
+            <ul>
+                <li><strong>No L_phys:</strong> We stop grounding the model in real physics parameters. <i>Does it lose its "scientific common sense"?</i></li>
+                <li><strong>No L_orth:</strong> We let the "Physics" and "Environment" brains overlap. <i>Does it get confused between habits and rules?</i></li>
+                <li><strong>Standard IRM:</strong> We use invariant logic but don't give it any physics hints.</li>
+                <li><strong>ERM Baseline:</strong> The "Simple AI" approach. No splitting, no physics, just raw data learning.</li>
+            </ul>
+
+            <h3>Type B: Modality Ablations (Senses Stress Tests)</h3>
+            <p>We "blindfold" the model by taking away its input senses:</p>
+            <ul>
+                <li><strong>No 3D Images:</strong> Can it predict based only on its track history?</li>
+                <li><strong>No Env Context:</strong> Can it predict without knowing which month or region it's in?</li>
+                <li><strong>1D Track Only:</strong> The "Minimum Survival" test — predicting only with Lat/Long and Wind speeds.</li>
+            </ul>
+        </section>
+
+        <!-- 5. SUMMARY -->
+        <section class="section-card">
+            <h2>🏆 The End Goal</h2>
+            <p>Success means achieving a high <span class="term-pill">RI-F1 Score</span> on <span class="term-pill">Unseen Basins</span>.</p>
+            <p>This means the model can spot the most dangerous, rapidly intensifying storms in parts of the world it has never seen before, potentially saving lives by providing earlier warnings for regions with limited historical data.</p>
+        </section>
+
+        <footer>
+            Built for the MLfTCC R&D Project • 2026
+        </footer>
+    </div>
+
+    <script>
+        mermaid.initialize({
+            startOnLoad: true,
+            theme: 'base',
+            themeVariables: {
+                'primaryColor': '#ffffff',
+                'primaryTextColor': '#1e293b',
+                'primaryBorderColor': '#2563eb',
+                'lineColor': '#64748b',
+                'secondaryColor': '#f1f5f9',
+                'tertiaryColor': '#f8fafc'
+            }
+        });
+    </script>
+</body>
+</html>
