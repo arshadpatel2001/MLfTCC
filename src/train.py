@@ -109,6 +109,7 @@ BEST_HPARAMS = {
 
 def build_model(args) -> TropiCycloneModel:
     return TropiCycloneModel.build(
+        model_size    = args.model_size,
         spatial_embed = args.spatial_embed,
         track_embed   = args.track_embed,
         env_embed     = args.env_embed,
@@ -229,7 +230,7 @@ def _train_one_experiment_inner(
     scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    best_val_acc = -1.0
+    best_val_f1 = -1.0
     best_ckpt    = None
     step         = 0
     history      = []
@@ -355,8 +356,8 @@ def _train_one_experiment_inner(
             )
 
             # Track best on SOURCE val (to avoid target leakage)
-            if r_src.accuracy_intensity > best_val_acc:
-                best_val_acc = r_src.accuracy_intensity
+            if r_src.f1_intensity > best_val_f1:
+                best_val_f1 = r_src.f1_intensity
                 if args.output_dir:
                     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
                     ckpt_path = Path(args.output_dir) / f"{run_id}_best.pt"
@@ -820,15 +821,17 @@ def parse_args():
                    help="Crash immediately if one specific experiment configuration fails")
 
     # Model architecture
-    p.add_argument("--spatial_embed", type=int, default=256,
+    p.add_argument("--model_size", type=str, choices=["lightweight", "complex"], default="lightweight",
+                   help="Model scale: lightweight (notebook original) or complex (ResBlocks)")
+    p.add_argument("--spatial_embed", type=int, default=None,
                    help="Embedding dimension for Data_3d branch")
-    p.add_argument("--track_embed",   type=int, default=64,
+    p.add_argument("--track_embed",   type=int, default=None,
                    help="Embedding dimension for Data_1d track branch")
-    p.add_argument("--env_embed",     type=int, default=128,
+    p.add_argument("--env_embed",     type=int, default=None,
                    help="Embedding dimension for Env-Data branch")
-    p.add_argument("--phys_dim",      type=int, default=64,
+    p.add_argument("--phys_dim",      type=int, default=None,
                    help="Dimension of the invariant physics sub-space (z_phys)")
-    p.add_argument("--final_dim",     type=int, default=256,
+    p.add_argument("--final_dim",     type=int, default=None,
                    help="Dimension of the fused representation space")
     p.add_argument("--dropout",       type=float, default=0.1,
                    help="Dropout probability across networks")

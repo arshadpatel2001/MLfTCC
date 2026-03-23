@@ -245,6 +245,76 @@ class PhysicsEncoder(nn.Module):
         return self.net(x)
 
 
+# ── Lightweight Encoders (Notebook Architecture) ─────────────────────────────
+
+class LightweightSpatialEncoder(nn.Module):
+    """Encode Data_3d (13,81,81) → (B, embed_dim)"""
+    def __init__(self, in_channels=13, embed_dim=128, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            ConvBnRelu(in_channels, 32, k=7, s=2, p=3),
+            ConvBnRelu(32, 64, k=3, s=2, p=1),
+            ConvBnRelu(64, 128, k=3, s=2, p=1),
+            ConvBnRelu(128, 256, k=3, s=2, p=1),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(256, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+
+    def forward(self, x): return self.proj(self.net(x))
+
+
+class LightweightTrackEncoder(nn.Module):
+    """Encode Data_1d (4,) → (B, embed_dim)"""
+    def __init__(self, in_dim=4, embed_dim=32, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+
+    def forward(self, x): return self.net(x)
+
+
+class LightweightEnvEncoder(nn.Module):
+    """Encode Env-Data (77,) → (B, embed_dim)"""
+    def __init__(self, in_dim=77, embed_dim=64, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
+
+    def forward(self, x): return self.net(x)
+
+
+class LightweightPhysicsEncoder(nn.Module):
+    """Encode physics features (8,) → (B, phys_dim)"""
+    def __init__(self, in_dim=8, phys_dim=32, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, phys_dim),
+            nn.LayerNorm(phys_dim)
+        )
+
+    def forward(self, x): return self.net(x)
+
+
 # ── Fusion + Prediction Heads ─────────────────────────────────────────────────
 
 class MultimodalBackbone(nn.Module):
@@ -259,24 +329,31 @@ class MultimodalBackbone(nn.Module):
 
     def __init__(
         self,
-        spatial_embed: int = 256,
-        track_embed:   int = 64,
-        env_embed:     int = 128,
-        phys_dim:      int = 64,
-        final_dim:     int = 256,
+        spatial_embed: int = 128,
+        track_embed:   int = 32,
+        env_embed:     int = 64,
+        phys_dim:      int = 32,
+        final_dim:     int = 128,
         dropout:       float = 0.1,
         use_3d:        bool = True,
         use_env:       bool = True,
+        model_size:    str = "lightweight",
     ):
         super().__init__()
         self.use_3d  = use_3d
         self.use_env = use_env
         self.phys_dim = phys_dim
 
-        self.spatial_enc = SpatialEncoder(embed_dim=spatial_embed, dropout=dropout) if use_3d else None
-        self.track_enc   = TrackEncoder(embed_dim=track_embed, dropout=dropout)
-        self.env_enc     = EnvEncoder(embed_dim=env_embed, dropout=dropout) if use_env else None
-        self.phys_enc    = PhysicsEncoder(phys_dim=phys_dim, dropout=dropout)
+        if model_size == "complex":
+            self.spatial_enc = ComplexSpatialEncoder(embed_dim=spatial_embed, dropout=dropout) if use_3d else None
+            self.track_enc   = ComplexTrackEncoder(embed_dim=track_embed, dropout=dropout)
+            self.env_enc     = ComplexEnvEncoder(embed_dim=env_embed, dropout=dropout) if use_env else None
+            self.phys_enc    = ComplexPhysicsEncoder(phys_dim=phys_dim, dropout=dropout)
+        else:
+            self.spatial_enc = LightweightSpatialEncoder(embed_dim=spatial_embed, dropout=dropout) if use_3d else None
+            self.track_enc   = LightweightTrackEncoder(embed_dim=track_embed, dropout=dropout)
+            self.env_enc     = LightweightEnvEncoder(embed_dim=env_embed, dropout=dropout) if use_env else None
+            self.phys_enc    = LightweightPhysicsEncoder(phys_dim=phys_dim, dropout=dropout)
 
         # Compute fused dimension
         fused_in = track_embed
@@ -352,7 +429,7 @@ class TaskHeads(nn.Module):
     Designed to share the same backbone, with separate final layers.
     """
 
-    def __init__(self, in_dim: int = 256, n_intensity: int = 5, n_direction: int = 8,
+    def __init__(self, in_dim: int = 128, n_intensity: int = 5, n_direction: int = 8,
                  dropout: float = 0.1):
         super().__init__()
 
@@ -406,20 +483,33 @@ class TropiCycloneModel(nn.Module):
     @classmethod
     def build(
         cls,
-        spatial_embed: int = 256,
-        track_embed:   int = 64,
-        env_embed:     int = 128,
-        phys_dim:      int = 64,
-        final_dim:     int = 256,
+        model_size:    str = "lightweight",
+        spatial_embed: int = None,
+        track_embed:   int = None,
+        env_embed:     int = None,
+        phys_dim:      int = None,
+        final_dim:     int = None,
         dropout:       float = 0.1,
         use_3d:        bool = True,
         use_env:       bool = True,
     ) -> "TropiCycloneModel":
+        if model_size == "complex":
+            se, te, ee, pd, fd = 256, 64, 128, 64, 256
+        else:
+            se, te, ee, pd, fd = 128, 32, 64, 32, 128
+        
+        spatial_embed = spatial_embed or se
+        track_embed   = track_embed or te
+        env_embed     = env_embed or ee
+        phys_dim      = phys_dim or pd
+        final_dim     = final_dim or fd
+
         backbone = MultimodalBackbone(
             spatial_embed=spatial_embed, track_embed=track_embed,
             env_embed=env_embed, phys_dim=phys_dim,
             final_dim=final_dim, dropout=dropout,
             use_3d=use_3d, use_env=use_env,
+            model_size=model_size,
         )
         heads = TaskHeads(in_dim=final_dim, dropout=dropout)
         return cls(backbone, heads)
