@@ -147,7 +147,7 @@ def plot_ri_comparison(
             data[m][b] = r.get("final target rapid intensification f1", 0.0)
 
     if not HAS_MPL:
-        print("\nRI-F1 per target basin:")
+        print("\nRapid Intensification F1 per target basin:")
         for m in methods:
             row = "  ".join(f"{b}:{data[m][b]:.3f}" for b in basins)
             print(f"  {METHOD_LABELS[m]:20s}: {row}")
@@ -172,7 +172,7 @@ def plot_ri_comparison(
 
     ax.set_xticks(x)
     ax.set_xticklabels([BASIN_DISPLAY[b] for b in basins], fontsize=11)
-    ax.set_ylabel("RI-F1 Score", fontsize=12)
+    ax.set_ylabel("Rapid Intensification F1 Score", fontsize=12)
     ax.set_title("Rapid Intensification F1 — Zero-Shot Cross-Basin Transfer", fontsize=13)
     ax.legend(loc="upper right", fontsize=9, ncol=2)
     ax.set_ylim(0, 0.8)
@@ -327,7 +327,7 @@ def generate_latex_table(
         "\\begin{tabular}{l" + "c" * len(basins) + "c}",
         "\\toprule",
         "Method & " + " & ".join(f"\\textbf{{{BASIN_DISPLAY[b]}}}" for b in basins)
-        + " & \\textbf{Avg} \\\\",
+        + " & \\textbf{Average} \\\\",
         "\\midrule",
     ]
 

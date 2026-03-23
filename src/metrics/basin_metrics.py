@@ -373,7 +373,7 @@ class TransferEvaluator:
         for basin, loader in source_loaders.items():
             ev = BasinEvaluator(basin)
             with torch.no_grad():
-                for batch in tqdm(loader, desc=f"Eval Source {basin}", dynamic_ncols=True, leave=False):
+                for batch in tqdm(loader, desc=f"Evaluate Source {basin}", dynamic_ncols=True, leave=False):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
@@ -401,7 +401,7 @@ class TransferEvaluator:
         # ── Target zero-shot performance ──────────────────────────────────────
         target_ev = BasinEvaluator(target_basin)
         with torch.no_grad():
-            for batch in tqdm(target_loader, desc=f"Eval Target {target_basin}", dynamic_ncols=True, leave=False):
+            for batch in tqdm(target_loader, desc=f"Evaluate Target {target_basin}", dynamic_ncols=True, leave=False):
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
                 out = model(batch)
@@ -450,12 +450,12 @@ class TransferEvaluator:
     def print_table(self, results: Optional[List[TransferResult]] = None):
         """
         Print a LaTeX-style results table (for copy-paste into the paper).
-        Columns: Method | Target Basin | Acc(Int) | Acc(Dir) | RI-F1 | BTG | BNTE
+        Columns: Method | Target Basin | Accuracy Intensity | Accuracy Direction | Rapid Intensification F1 | Basin Transfer Gap | Basin-Normalized Transfer Efficiency
         """
         rs = results or self.results
         header = (
-            f"{'Method':<12} {'Target':<6} {'Acc-Int':>8} {'Acc-Dir':>8} "
-            f"{'RI-F1':>7} {'BTG':>8} {'BNTE':>8}"
+            f"{'Method':<20} {'Target':<10} {'Accuracy Intensity':>20} {'Accuracy Direction':>20} "
+            f"{'Rapid Intensification F1':>30} {'Basin Transfer Gap':>20} {'Basin-Normalized Transfer Efficiency':>38}"
         )
         sep = "─" * len(header)
         print(sep)
@@ -463,9 +463,9 @@ class TransferEvaluator:
         print(sep)
         for r in rs:
             print(
-                f"{r.method:<12} {r.target_basin:<6} "
-                f"{r.target_accuracy_intensity:>8.3f} {r.target_accuracy_direction:>8.3f} "
-                f"{r.target_rapid_intensification_f1:>7.3f} {r.btg:>8.3f} {r.bnte:>8.3f}"
+                f"{r.method:<20} {r.target_basin:<10} "
+                f"{r.target_accuracy_intensity:>20.3f} {r.target_accuracy_direction:>20.3f} "
+                f"{r.target_rapid_intensification_f1:>30.3f} {r.btg:>20.3f} {r.bnte:>38.3f}"
             )
         print(sep)
 

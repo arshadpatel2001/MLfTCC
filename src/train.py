@@ -240,8 +240,8 @@ def _train_one_experiment_inner(
     log.info(f"Device: {device}")
     log.info(
         f"Train samples: {total_train:,}  |  "
-        f"Val-src: {len(val_loader_src.dataset):,}  |  "
-        f"Val-tgt: {len(val_loader_tgt.dataset):,}"
+        f"Validation Source: {len(val_loader_src.dataset):,}  |  "
+        f"Validation Target: {len(val_loader_tgt.dataset):,}"
     )
     log.info(f"Starting training for {args.epochs} epochs ...")
 
@@ -310,13 +310,13 @@ def _train_one_experiment_inner(
 
             val_start = time.time()
             with torch.no_grad():
-                for batch in tqdm(val_loader_src, desc="Val Source", leave=False, dynamic_ncols=True):
+                for batch in tqdm(val_loader_src, desc="Validation Source", leave=False, dynamic_ncols=True):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
                     ev_src.update(batch, out)
 
-                for batch in tqdm(val_loader_tgt, desc="Val Target", leave=False, dynamic_ncols=True):
+                for batch in tqdm(val_loader_tgt, desc="Validation Target", leave=False, dynamic_ncols=True):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
@@ -423,7 +423,7 @@ def _train_one_experiment_inner(
     ev_final = BasinEvaluator(target_basin)
     final_ev_start = time.time()
     with torch.no_grad():
-        for batch in tqdm(val_loader_tgt, desc="Final Eval", leave=False, dynamic_ncols=True):
+        for batch in tqdm(val_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
@@ -585,7 +585,7 @@ def few_shot_finetune(
     model.eval()
     fs_eval_start = time.time()
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Few-shot Eval", leave=False, dynamic_ncols=True):
+        for batch in tqdm(test_loader, desc="Few-shot Evaluation", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
@@ -622,7 +622,7 @@ def run_lobo_benchmark(args):
     all_results = []
 
     bench_start = time.time()
-    for split in tqdm(splits, desc="LOBO Splits", dynamic_ncols=True):
+    for split in tqdm(splits, desc="Leave-One-Basin-Out Splits", dynamic_ncols=True):
         for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True):
             exp_start = time.time()
             run_id = f"{method_name}_{split['target']}"
@@ -667,7 +667,7 @@ def _print_summary_table(results, methods, splits):
     print("BASIN GENERALIZATION BENCHMARK — Zero-Shot Transfer (Accuracy-Intensity)")
     print("=" * 90)
 
-    header = f"{'Method':<12}" + "".join(f"{t:>8}" for t in targets) + f"{'Avg':>8}"
+    header = f"{'Method':<12}" + "".join(f"{t:>8}" for t in targets) + f"{'Average':>10}"
     print(header)
     print("-" * len(header))
 
@@ -687,7 +687,7 @@ def _print_summary_table(results, methods, splits):
             else:
                 row += f"{'—':>8}"
         avg = sum(accs) / len(accs) if accs else 0
-        row += f"{avg:>8.3f}"
+        row += f"{avg:>10.3f}"
         print(row)
 
     print("=" * 90)
