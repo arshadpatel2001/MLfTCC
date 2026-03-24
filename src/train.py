@@ -197,7 +197,15 @@ def _train_one_experiment_inner(
         split="val", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
     )
+    # val_loader_tgt: used for training-time monitoring only (split="val").
+    # test_loader_tgt: used ONLY for the final best-model evaluation (split="test").
+    # Keeping these separate prevents target test-set leakage into training history.
     val_loader_tgt = make_dataloader(
+        root=args.data_root, basins=[target_basin],
+        split="val", batch_size=bs, num_workers=args.num_workers,
+        use_3d=not args.no_3d, use_env=not args.no_env,
+    )
+    test_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
         split="test", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
@@ -209,12 +217,23 @@ def _train_one_experiment_inner(
     # ── Method ────────────────────────────────────────────────────────────────
     method_kwargs = {k: v for k, v in hp.items()
                     if k not in {"lr", "batch_size", "weight_decay"}}
-    # Inject architecture-dependent hyperparameters that must match the model.
-    # Without this, changing --final_dim causes a runtime shape error in DANN's
-    # discriminator on the first forward pass.
+
+    # Estimate total training steps so schedule-aware methods (DANN) ramp correctly.
+    n_batches_estimate = max(1, max(len(l) for l in train_loaders_per_env.values()))
+
+    # Inject architecture-dependent kwargs that must align with the built model.
     if method_name == "dann":
-        method_kwargs.setdefault("feature_dim", args.final_dim)
+        # feature_dim must match model output; read directly to avoid None issues
+        # when --final_dim is not set on the CLI.
+        method_kwargs["feature_dim"] = model.backbone.get_output_dim()
         method_kwargs.setdefault("n_domains", len(BASIN_CODES))
+        # Override static total_steps with the actual expected step count so the
+        # GRL alpha schedule ramps correctly for both short and long experiments.
+        method_kwargs["total_steps"] = n_batches_estimate * args.epochs
+    if method_name == "physirm":
+        # phys_dim must exactly match model.backbone.phys_dim to avoid shape errors
+        # in phys_predictor. Always read from the model, ignoring BEST_HPARAMS value.
+        method_kwargs["phys_dim"] = model.backbone.phys_dim
     method = build_method(method_name, **method_kwargs)
 
     # Methods with learnable parameters (DANN discriminator, PhysIRM predictor)
@@ -242,7 +261,8 @@ def _train_one_experiment_inner(
     log.info(
         f"Train samples: {total_train:,}  |  "
         f"Validation Source: {len(val_loader_src.dataset):,}  |  "
-        f"Validation Target: {len(val_loader_tgt.dataset):,}"
+        f"Validation Target: {len(val_loader_tgt.dataset):,}  |  "
+        f"Test Target: {len(test_loader_tgt.dataset):,}"
     )
     log.info(f"Starting training for {args.epochs} epochs ...")
 
@@ -424,7 +444,7 @@ def _train_one_experiment_inner(
     ev_final = BasinEvaluator(target_basin)
     final_ev_start = time.time()
     with torch.no_grad():
-        for batch in tqdm(val_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True):
+        for batch in tqdm(test_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)

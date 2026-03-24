@@ -511,14 +511,19 @@ class TCNDDataset(Dataset):
             ohe(d.get("area"),             6),   #  6
             ohe(d.get("intensity_class"),  6),   #  6
             scalar_norm(d.get("wind"),          scale=1.0),   #  1  (already normalised 0-1)
-            scalar_norm(d.get("move_velocity"), scale=50.0),  #  1  (m/s, approx max 50)
+            scalar_norm(d.get("move_velocity"), scale=1.0),   #  1  (m/s, notebook uses raw)
             ohe(d.get("location_long"),   36),   # 36
             ohe(d.get("location_lat"),    12),   # 12
-            scalar_norm(d.get("history_direction12"), scale=7.0, sentinel_normed=0.5),  #  1  (0-7, -1→0.5)
-            scalar_norm(d.get("history_direction24"), scale=7.0, sentinel_normed=0.5),  #  1
-            scalar_norm(d.get("history_inte_change24"), scale=4.0, sentinel_normed=0.5),  # 1  (0-4, -1→0.5)
+            scalar_norm(d.get("history_direction12"), scale=1.0, sentinel_normed=0.0),  #  1  (0-7, -1→0.0)
+            scalar_norm(d.get("history_direction24"), scale=1.0, sentinel_normed=0.0),  #  1
+            scalar_norm(d.get("history_inte_change24"), scale=1.0, sentinel_normed=0.0),  # 1  (0-4, -1→0.0)
         ]
         env_vec = torch.from_numpy(np.concatenate(parts))  # (77,)
+
+        assert env_vec.shape[0] == 77, (
+            f"env vector has length {env_vec.shape[0]}, expected 77. "
+            f"Check .npy file structure at {path}"
+        )
 
         y_intensity = int(np.asarray(d.get("future_inte_change24", 2)).ravel()[0])
         y_direction = int(np.asarray(d.get("future_direction24",   0)).ravel()[0])
@@ -536,60 +541,91 @@ class TCNDDataset(Dataset):
     ) -> torch.Tensor:
         """
         8-dim physics feature vector for PhysIRM invariant sub-space.
-          [0] SST anomaly vs basin climatology
-          [1] Vertical wind shear |U_200 - U_850|
-          [2] Coriolis parameter (normalised, from basin-level constant)
-          [3] MPI proxy (SST - 26°C threshold)
-          [4] Boundary layer moisture (mean V at 925 hPa)
-          [5] Outflow proxy (mean Z at 200 hPa normalised)
-          [6] Steering proxy (mean Z at 500 hPa normalised)
-          [7] Current intensity (WND_norm, as-is from data)
+          [0] SST anomaly vs basin climatology (basin-level constant; 28°C reference)
+          [1] Wind shear proxy: negative spatial cross-correlation of U_200 and U_850
+              (cross-channel Pearson correlation is invariant to per-sample z-scoring)
+          [2] Coriolis parameter (normalised, per-sample from LAT_norm)
+          [3] MPI proxy (basin SST - 26°C threshold, basin-level)
+          [4] Boundary-layer dynamics proxy (WND_norm from Data_1d)
+          [5] Outflow proxy: spatial skewness of Z_200 (channel 8)
+          [6] Steering proxy: spatial skewness of Z_500 (channel 9)
+          [7] Current intensity (WND_norm, as-is from Data_1d)
 
-        Note: Since the exact inverse of the TCND Data1D normalization is
-        unknown (the paper’s stated formulas do not reproduce the released
-        data values), we use basin-level physical constants from
-        BASIN_CORIOLIS rather than trying to un-normalize per-sample LAT.
+        NOTE on normalization: Data_3d channels are per-sample z-scored in _load_3d,
+        so their spatial means are ~0 and spatial variances are ~1 by construction.
+        Attempting to recover absolute physical units via the global NORM constants
+        is incorrect (produces values near the normalisation mean for every sample).
+        We instead use:
+          - Basin-level climatological constants (BASIN_SST_STATS) for SST / MPI.
+          - Cross-channel Pearson correlation for wind shear (invariant to z-scoring).
+          - Spatial skewness for outflow / steering (also invariant to z-scoring).
+          - Data_1d features (WND_norm, LAT_norm) for intensity and Coriolis.
         """
-        wnd_norm = float(row.get("WND_norm", 0.0))
-
+        wnd_norm  = float(row.get("WND_norm", 0.0))
         sst_stats = BASIN_SST_STATS.get(basin, {"mean": 28.0, "std": 2.0})
-        if data_3d.shape[0] > 0:
-            # Channel 12 is SST; un-normalise
-            sst_val = (data_3d[12].mean().item()
-                       * NORM["SST"]["std"] + NORM["SST"]["mean"])
-        else:
-            sst_val = sst_stats["mean"]
 
-        sst_anom      = (sst_val - sst_stats["mean"]) / (sst_stats["std"] + 1e-6)
-        # Proper vector wind shear: sqrt((U_200 - U_850)² + (V_200 - V_850)²)
-        # Channels: 0=U_200, 2=U_850, 4=V_200, 6=V_850
+        # [0] SST anomaly: basin climatological mean vs. global tropical reference (28°C)
+        sst_anom = float(np.clip(
+            (sst_stats["mean"] - 28.0) / max(sst_stats["std"], 1e-6), -3.0, 3.0
+        ))
+
+        # [1] Wind shear proxy: negative spatial cross-correlation between U_200 and U_850.
+        # After per-sample z-scoring, each channel has zero mean.  Pearson correlation
+        # between two channels is invariant to individual z-scoring and captures opposing
+        # wind patterns.  Negated so that high shear → large positive feature value.
         if data_3d.shape[0] >= 13:
-            u_200_raw = data_3d[0].mean().item() * NORM["U_200"]["std"] + NORM["U_200"]["mean"]
-            u_850_raw = data_3d[2].mean().item() * NORM["U_850"]["std"] + NORM["U_850"]["mean"]
-            v_200_raw = data_3d[4].mean().item() * NORM["V_200"]["std"] + NORM["V_200"]["mean"]
-            v_850_raw = data_3d[6].mean().item() * NORM["V_850"]["std"] + NORM["V_850"]["mean"]
-            du = u_200_raw - u_850_raw
-            dv = v_200_raw - v_850_raw
-            shear = float(np.sqrt(du**2 + dv**2))
+            u200  = data_3d[0].float().flatten()   # channel 0 = U at 200 hPa
+            u850  = data_3d[2].float().flatten()   # channel 2 = U at 850 hPa
+            denom = (u200.std() * u850.std()).clamp(min=1e-6)
+            corr  = float((u200 * u850).mean() / denom)
+            shear = float(np.clip(-corr, -1.0, 1.0))
         else:
             shear = 0.0
-        
-        # Compute proper dynamic Coriolis per time step using un-normalized latitude
-        # TCND LAT_norm = (LAT_raw + 90.0) / 180.0
-        # => LAT_raw = LAT_norm * 180.0 - 90.0
-        lat_norm = float(row.get("LAT_norm", 0.0))
-        lat_deg = lat_norm * 180.0 - 90.0
-        omega = 7.2921e-5
-        coriolis_raw = 2 * omega * np.sin(np.deg2rad(lat_deg))
-        coriolis_norm = float(np.clip(coriolis_raw / 1.4584e-4, -1, 1))
-        mpi_proxy     = float(np.clip((sst_val - 26.0) / 10.0, -1, 1))
-        bl_moisture   = data_3d[7].mean().item() if data_3d.shape[0] >= 13 else 0.0
-        outflow       = data_3d[8].mean().item()  if data_3d.shape[0] >= 13 else 0.0
-        steering      = data_3d[9].mean().item()  if data_3d.shape[0] >= 13 else 0.0
 
-        return torch.tensor([sst_anom, shear, coriolis_norm, mpi_proxy,
-                              bl_moisture, outflow, steering, wnd_norm],
-                             dtype=torch.float32)
+        # [2] Coriolis parameter per time step using un-normalized latitude.
+        # TCND LAT_norm = (LAT_raw + 90.0) / 180.0  →  LAT_raw = LAT_norm * 180 - 90
+        lat_norm      = float(row.get("LAT_norm", 0.0))
+        lat_deg       = lat_norm * 180.0 - 90.0
+        omega         = 7.2921e-5
+        coriolis_raw  = 2 * omega * np.sin(np.deg2rad(lat_deg))
+        coriolis_norm = float(np.clip(coriolis_raw / 1.4584e-4, -1.0, 1.0))
+
+        # [3] MPI proxy: basin SST vs 26°C intensification threshold (basin-level)
+        mpi_proxy = float(np.clip((sst_stats["mean"] - 26.0) / 10.0, -1.0, 1.0))
+
+        # [4] Boundary-layer dynamics proxy: current wind intensity (Data_1d, not z-scored)
+        bl_proxy = float(np.clip(wnd_norm, 0.0, 1.0))
+
+        # [5] Outflow proxy: spatial skewness of Z_200 (channel 8).
+        # Skewness is invariant to zero-mean / unit-variance z-scoring and captures
+        # asymmetric upper-tropospheric outflow structure.
+        if data_3d.shape[0] >= 13:
+            z200    = data_3d[8].float()
+            outflow = float((
+                (z200 - z200.mean()).pow(3).mean()
+                / z200.std().clamp(min=1e-6).pow(3)
+            ).clamp(-3.0, 3.0))
+        else:
+            outflow = 0.0
+
+        # [6] Steering proxy: spatial skewness of Z_500 (channel 9)
+        if data_3d.shape[0] >= 13:
+            z500     = data_3d[9].float()
+            steering = float((
+                (z500 - z500.mean()).pow(3).mean()
+                / z500.std().clamp(min=1e-6).pow(3)
+            ).clamp(-3.0, 3.0))
+        else:
+            steering = 0.0
+
+        # [7] Current intensity (normalised wind speed from Data_1d)
+        return torch.tensor(
+            [sst_anom, shear, coriolis_norm, mpi_proxy,
+             bl_proxy, outflow, steering, wnd_norm],
+            dtype=torch.float32,
+        )
+
+
 
 
 # ── DataLoader factory ────────────────────────────────────────────────────────

@@ -310,7 +310,7 @@ class DANN(DGMethod, nn.Module):
 
     def __init__(
         self,
-        feature_dim: int = 256,
+        feature_dim: int = 128,   # matches lightweight model default (final_dim=128)
         n_domains: int = 6,
         dann_lambda: float = 1.0,
         total_steps: int = 10000,
@@ -449,10 +449,15 @@ class MAML(DGMethod):
                 continue
             n_s = n // 2
 
+            # Shuffle within the batch so support/query are not temporally biased
+            perm = torch.randperm(n, device=batch["data_1d"].device)
+            batch_s = {k: (v[perm] if isinstance(v, torch.Tensor) else v)
+                       for k, v in batch.items()}
+
             support = {k: (v[:n_s] if isinstance(v, torch.Tensor) else v)
-                       for k, v in batch.items()}
+                       for k, v in batch_s.items()}
             query   = {k: (v[n_s:] if isinstance(v, torch.Tensor) else v)
-                       for k, v in batch.items()}
+                       for k, v in batch_s.items()}
 
             fast_w = self._inner_loop(model, support)
             # Query loss with adapted weights

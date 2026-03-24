@@ -245,6 +245,16 @@ class PhysicsEncoder(nn.Module):
         return self.net(x)
 
 
+
+# ── Complex encoder aliases ───────────────────────────────────────────────────
+# The "complex" model_size branch uses these names. They map to the full-capacity
+# encoder classes defined above (SpatialEncoder has ResBlocks + SE, etc.).
+ComplexSpatialEncoder = SpatialEncoder
+ComplexTrackEncoder   = TrackEncoder
+ComplexEnvEncoder     = EnvEncoder
+ComplexPhysicsEncoder = PhysicsEncoder
+
+
 # ── Lightweight Encoders (Notebook Architecture) ─────────────────────────────
 
 class LightweightSpatialEncoder(nn.Module):
