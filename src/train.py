@@ -949,9 +949,12 @@ if __name__ == "__main__":
     
     # ── GPU Optimizations ─────────────────────────────────────────────────────
     if torch.cuda.is_available():
-        # Enable cuDNN auto-tuner (massive speedup for static CNN input sizes)
+        # Enable cuDNN auto-tuner and TensorFloat-32 (TF32) for Ampere GPUs
         torch.backends.cudnn.benchmark = True
-        
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
     global_log_file = log_dir / f"train_run_{args.mode}_{timestamp}.log"
     fh = logging.FileHandler(global_log_file)
     fh.setLevel(logging.INFO)

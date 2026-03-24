@@ -110,6 +110,13 @@ NORM = {
     "V_925": {"mean": 0.0,  "std": 5.0},
 }
 
+# ── Global Cache ──────────────────────────────────────────────────────────────
+# In LOBO/incremental modes, `train_one_experiment` is called iteratively,
+# which re-instantiates completely new DataLoaders. By linking them to a
+# module-level shared dictionary, the first method pays the I/O price,
+# and all subsequent methods hit RAM instantly.
+GLOBAL_CACHE: Dict = {}
+
 
 class TCNDSample:
     """Lightweight container for one TC observation."""
@@ -185,7 +192,10 @@ class TCNDDataset(Dataset):
         self.use_env = use_env
         self.cache = cache
         self.disable_tqdm = disable_tqdm
-        self._cache_dict: Dict = {}
+        
+        # Point to global cache so datasets instantiated later in loops (like LOBO)
+        # can reuse the datasets loaded by the very first method!
+        self._cache_dict: Dict = GLOBAL_CACHE if cache else {}
 
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
 
