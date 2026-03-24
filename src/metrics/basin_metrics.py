@@ -70,6 +70,7 @@ class BasinResult:
     precision_direction: float
     recall_direction: float
     f1_direction: float
+    rapid_intensification_accuracy:  float  # accuracy on RI class (class 4)
     rapid_intensification_recall:    float  # recall on RI class (class 4)
     rapid_intensification_precision: float
     rapid_intensification_f1:        float
@@ -151,9 +152,9 @@ def weighted_metrics(preds: torch.Tensor, labels: torch.Tensor, n_classes: int) 
     return float(w_prec), float(w_rec), float(w_f1)
 
 
-def ri_metrics(preds: torch.Tensor, labels: torch.Tensor) -> Tuple[float, float, float]:
+def ri_metrics(preds: torch.Tensor, labels: torch.Tensor) -> Tuple[float, float, float, float]:
     """
-    Precision, Recall, F1 for Rapid Intensification (class 4).
+    Accuracy, Precision, Recall, F1 for Rapid Intensification (class 4).
     This is the safety-critical class — false negatives (missed RI) cost lives.
     Report this prominently in the paper.
     """
@@ -163,13 +164,17 @@ def ri_metrics(preds: torch.Tensor, labels: torch.Tensor) -> Tuple[float, float,
     tp = (pred_c & label_c).sum().float()
     fp = (pred_c & ~label_c).sum().float()
     fn = (~pred_c & label_c).sum().float()
+    tn = (~pred_c & ~label_c).sum().float()
+    
+    total = tp + fp + tn + fn
+    acc = torch.where(total > 0, (tp + tn) / total, torch.tensor(0.0, device=preds.device))
     
     # Handle edge cases natively on GPU
     prec = torch.where(tp + fp > 0, tp / (tp + fp), torch.tensor(0.0, device=preds.device))
     rec  = torch.where(tp + fn > 0, tp / (tp + fn), torch.tensor(0.0, device=preds.device))
     f1   = torch.where(prec + rec > 0, 2 * prec * rec / (prec + rec), torch.tensor(0.0, device=preds.device))
     
-    return float(prec.item()), float(rec.item()), float(f1.item())
+    return float(acc.item()), float(prec.item()), float(rec.item()), float(f1.item())
 
 
 # ── Novel Metric: Basin Transfer Gap (BTG) ───────────────────────────────────
@@ -295,14 +300,14 @@ class BasinEvaluator:
                 basin=self.basin_name, n_samples=0,
                 accuracy_intensity=0.0, precision_intensity=0.0, recall_intensity=0.0, f1_intensity=0.0,
                 accuracy_direction=0.0, precision_direction=0.0, recall_direction=0.0, f1_direction=0.0,
-                rapid_intensification_recall=0.0, rapid_intensification_precision=0.0, rapid_intensification_f1=0.0,
+                rapid_intensification_accuracy=0.0, rapid_intensification_recall=0.0, rapid_intensification_precision=0.0, rapid_intensification_f1=0.0,
             )
         pi = torch.cat(self._preds_int)
         li = torch.cat(self._labels_int)
         pd = torch.cat(self._preds_dir)
         ld = torch.cat(self._labels_dir)
 
-        ri_p, ri_r, ri_f = ri_metrics(pi, li)
+        ri_a, ri_p, ri_r, ri_f = ri_metrics(pi, li)
         pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=5)
         pd_p, pd_r, pd_f = weighted_metrics(pd, ld, n_classes=8)
 
@@ -317,6 +322,7 @@ class BasinEvaluator:
             precision_direction = pd_p,
             recall_direction = pd_r,
             f1_direction       = pd_f,
+            rapid_intensification_accuracy  = ri_a,
             rapid_intensification_recall    = ri_r,
             rapid_intensification_precision = ri_p,
             rapid_intensification_f1        = ri_f,

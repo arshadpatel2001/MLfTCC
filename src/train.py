@@ -497,6 +497,17 @@ def _train_one_experiment_inner(
         "source_basins": source_basins,
         "target_basin":  target_basin,
         "final source accuracy intensity": final_src.accuracy_intensity,
+        "final source precision intensity": final_src.precision_intensity,
+        "final source recall intensity": final_src.recall_intensity,
+        "final source f1 intensity": final_src.f1_intensity,
+        "final source rapid intensification accuracy": final_src.rapid_intensification_accuracy,
+        "final source rapid intensification precision": final_src.rapid_intensification_precision,
+        "final source rapid intensification recall": final_src.rapid_intensification_recall,
+        "final source rapid intensification f1": final_src.rapid_intensification_f1,
+        "final source accuracy direction": final_src.accuracy_direction,
+        "final source precision direction": final_src.precision_direction,
+        "final source recall direction": final_src.recall_direction,
+        "final source f1 direction": final_src.f1_direction,
         "final target accuracy intensity": final.accuracy_intensity,
         "btg":           btg,
         "bnte":          bnte,
@@ -507,6 +518,7 @@ def _train_one_experiment_inner(
         "final target precision direction": final.precision_direction,
         "final target recall direction": final.recall_direction,
         "final target f1 direction": final.f1_direction,
+        "final target rapid intensification accuracy": final.rapid_intensification_accuracy,
         "final target rapid intensification precision": final.rapid_intensification_precision,
         "final target rapid intensification recall": final.rapid_intensification_recall,
         "final target rapid intensification f1": final.rapid_intensification_f1,
@@ -534,6 +546,7 @@ def _train_one_experiment_inner(
         result["few_shot target recall direction"] = fs_result.recall_direction
         result["few_shot target f1 direction"] = fs_result.f1_direction
         
+        result["few_shot target rapid intensification accuracy"] = fs_result.rapid_intensification_accuracy
         result["few_shot target rapid intensification precision"] = fs_result.rapid_intensification_precision
         result["few_shot target rapid intensification recall"] = fs_result.rapid_intensification_recall
         result["few_shot target rapid intensification f1"] = fs_result.rapid_intensification_f1
@@ -548,6 +561,7 @@ def _train_one_experiment_inner(
             f"target precision direction={fs_result.precision_direction:.3f}, "
             f"target recall direction={fs_result.recall_direction:.3f}, "
             f"target f1 direction={fs_result.f1_direction:.3f}, "
+            f"target rapid intensification accuracy={fs_result.rapid_intensification_accuracy:.3f}, "
             f"target rapid intensification precision={fs_result.rapid_intensification_precision:.3f}, "
             f"target rapid intensification recall={fs_result.rapid_intensification_recall:.3f}, "
             f"target rapid intensification f1={fs_result.rapid_intensification_f1:.3f}"
@@ -734,45 +748,67 @@ def run_lobo_benchmark(args):
 
 
 def _print_summary_table(results, methods, splits):
-    """Print a NeurIPS-style results table for multiple core metrics."""
+    """Print a NeurIPS-style results table for multiple core metrics, splitting Source vs Target."""
     targets = [s["target"] for s in splits]
     
     metrics_to_print = [
-        ("Intensity Accuracy", "final target accuracy intensity"),
-        ("Intensity Macro F1", "final target f1 intensity"),
-        ("Rapid Intensification F1", "final target rapid intensification f1"),
-        ("Direction Accuracy", "final target accuracy direction")
+        ("Intensity Accuracy", "final source accuracy intensity", "final target accuracy intensity"),
+        ("Intensity Weighted F1", "final source f1 intensity", "final target f1 intensity"),
+        ("Intensity Precision", "final source precision intensity", "final target precision intensity"),
+        ("Intensity Recall", "final source recall intensity", "final target recall intensity"),
+        ("Rapid Intensification Accuracy", "final source rapid intensification accuracy", "final target rapid intensification accuracy"),
+        ("Rapid Intensification F1", "final source rapid intensification f1", "final target rapid intensification f1"),
+        ("Rapid Intensification Precision", "final source rapid intensification precision", "final target rapid intensification precision"),
+        ("Rapid Intensification Recall", "final source rapid intensification recall", "final target rapid intensification recall"),
+        ("Direction Accuracy", "final source accuracy direction", "final target accuracy direction"),
+        ("Direction Weighted F1", "final source f1 direction", "final target f1 direction"),
+        ("Direction Precision", "final source precision direction", "final target precision direction"),
+        ("Direction Recall", "final source recall direction", "final target recall direction")
     ]
     
-    for metric_title, metric_key in metrics_to_print:
-        print("\n" + "=" * 90)
-        print(f"BASIN GENERALIZATION BENCHMARK — Zero-Shot Transfer ({metric_title})")
-        print("=" * 90)
+    for metric_title, src_key, tgt_key in metrics_to_print:
+        table_width = 14 + len(targets) * 22 + 22
+        print("\n" + "=" * table_width)
+        print(f"BASIN GENERALIZATION BENCHMARK — {metric_title} (Source vs Target)")
+        print("=" * table_width)
 
-        header = f"{'Method':<12}" + "".join(f"{t:>12}" for t in targets) + f"{'Average':>12}"
-        print(header)
-        print("-" * len(header))
+        # Header 1: Target Basins
+        header1 = f"{'Method':<14}"
+        for t in targets:
+            header1 += f"{t:^22}"
+        header1 += f"{'Average':^22}"
+        print(header1)
+        
+        # Header 2: Source / Target sub-columns
+        header2 = f"{'':<14}"
+        for _ in range(len(targets) + 1):
+            header2 += f"{'Source':>10} {'Target':>11}"
+        print(header2)
+        print("-" * table_width)
 
         for method in methods:
-            row = f"{method:<12}"
-            vals = []
+            row = f"{method:<14}"
+            src_vals, tgt_vals = [], []
             for t in targets:
                 r = next(
                     (x for x in results
                      if x["method"] == method and x["target_basin"] == t),
                     None
                 )
-                if r and metric_key in r:
-                    val = r[metric_key]
-                    vals.append(val)
-                    row += f"{val:>12.3f}"
+                if r and src_key in r and tgt_key in r:
+                    s_val, t_val = r[src_key], r[tgt_key]
+                    src_vals.append(s_val)
+                    tgt_vals.append(t_val)
+                    row += f"{s_val:>10.3f} {t_val:>11.3f}"
                 else:
-                    row += f"{'—':>12}"
-            avg = sum(vals) / len(vals) if vals else 0
-            row += f"{avg:>12.3f}"
+                    row += f"{'—':>10} {'—':>11}"
+            
+            src_avg = sum(src_vals) / len(src_vals) if src_vals else 0
+            tgt_avg = sum(tgt_vals) / len(tgt_vals) if tgt_vals else 0
+            row += f"{src_avg:>10.3f} {tgt_avg:>11.3f}"
             print(row)
 
-        print("=" * 90)
+        print("=" * table_width)
 
 
 # ── Incremental Benchmark ─────────────────────────────────────────────────────
