@@ -218,6 +218,9 @@ def _train_one_experiment_inner(
 
     # ── Model ─────────────────────────────────────────────────────────────────
     model = build_model(args).to(device)
+    if getattr(args, "compile", False) and hasattr(torch, "compile"):
+        log.info(f"[{run_id}] Compiling model with torch.compile...")
+        model = torch.compile(model)
 
     # ── Method ────────────────────────────────────────────────────────────────
     method_kwargs = {k: v for k, v in hp.items()
@@ -297,7 +300,7 @@ def _train_one_experiment_inner(
                     env_iters[b] = iter(train_loaders_per_env[b])
                     batch = next(env_iters[b])
                 batches[b] = {
-                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
 
@@ -466,6 +469,7 @@ def _train_one_experiment_inner(
 
     final_src = ev_final_src.compute()
     final = ev_final.compute()
+    del ev_final_src, ev_final  # free large prediction lists eagerly
 
     btg = basin_transfer_gap(final_src.accuracy_intensity, final.accuracy_intensity)
     bnte = basin_normalized_transfer_efficiency(final_src.accuracy_intensity, final.accuracy_intensity, 0.0)
@@ -888,6 +892,10 @@ def parse_args():
     p.add_argument("--no_tqdm", action="store_true",
                    help="Hide TQDM progress bars and only print essential logs")
 
+    # Performance
+    p.add_argument("--compile", action="store_true",
+                   help="Enable PyTorch 2.0 torch.compile for A100/H100 speedup")
+
     # Few-shot
     p.add_argument("--few_shot",      action="store_true",
                    help="Enable few-shot fine-tuning on the target basin")
@@ -909,6 +917,11 @@ if __name__ == "__main__":
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     args.run_timestamp = timestamp
     
+    # ── GPU Optimizations ─────────────────────────────────────────────────────
+    if torch.cuda.is_available():
+        # Enable cuDNN auto-tuner (massive speedup for static CNN input sizes)
+        torch.backends.cudnn.benchmark = True
+        
     global_log_file = log_dir / f"train_run_{args.mode}_{timestamp}.log"
     fh = logging.FileHandler(global_log_file)
     fh.setLevel(logging.INFO)

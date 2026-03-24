@@ -257,8 +257,9 @@ class BasinEvaluator:
         results = evaluator.compute()
     """
 
-    def __init__(self, basin_name: str = "unknown"):
+    def __init__(self, basin_name: str = "unknown", collect_features: bool = False):
         self.basin_name = basin_name
+        self._collect_features = collect_features
         self._preds_int  : List[int] = []
         self._labels_int : List[int] = []
         self._preds_dir  : List[int] = []
@@ -274,7 +275,7 @@ class BasinEvaluator:
             out["logits_direction"].argmax(-1).cpu().numpy().tolist()
         )
         self._labels_dir.extend(batch["y_direction"].cpu().numpy().tolist())
-        if "z" in out:
+        if self._collect_features and "z" in out:
             self._features.append(out["z"].detach().cpu())
 
     def compute(self) -> BasinResult:
@@ -375,7 +376,7 @@ class TransferEvaluator:
             ev = BasinEvaluator(basin)
             with torch.no_grad():
                 for batch in tqdm(loader, desc=f"Evaluate Source {basin}", dynamic_ncols=True, leave=False, disable=disable_tqdm):
-                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
                     ev.update(batch, out)
