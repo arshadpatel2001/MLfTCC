@@ -37,20 +37,17 @@ import torch.nn.functional as F
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Intensity class mapping
-# 0: Rapid Weakening (ΔWind ≤ -30 kt/24h)
-# 1: Weakening       (-30 < ΔWind ≤ -10 kt/24h)
-# 2: Steady          (-10 < ΔWind ≤ +10 kt/24h)
-# 3: Intensification (+10 < ΔWind ≤ +30 kt/24h)
-# 4: Rapid Intensification (ΔWind > +30 kt/24h)  ← the safety-critical class
+# Intensity class mapping (4-class TCND schema)
+# 0: Weakening         (ΔWind < -10 kt/24h)
+# 1: Steady            (-10 ≤ ΔWind ≤ +10 kt/24h)
+# 2: Intensification   (+10 < ΔWind ≤ +30 kt/24h)
+# 3: Rapid Intensification (ΔWind > +30 kt/24h)
 INTENSITY_CLASSES = {
-    0: "Rapid Weakening",
-    1: "Weakening",
-    2: "Steady",
-    3: "Intensification",
-    4: "Rapid Intensification",
+    0: "Weakening",
+    1: "Steady",
+    2: "Intensification",
+    3: "Rapid Intensification",
 }
-RI_CLASS = 4  # Rapid Intensification — the class that matters most for warnings
 
 DIRECTION_CLASSES = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
@@ -147,29 +144,6 @@ def weighted_metrics(preds: torch.Tensor, labels: torch.Tensor, n_classes: int) 
     return float(w_prec), float(w_rec), float(w_f1)
 
 
-def ri_metrics(preds: torch.Tensor, labels: torch.Tensor) -> Tuple[float, float, float, float]:
-    """
-    Accuracy, Precision, Recall, F1 for Rapid Intensification (class 4).
-    This is the safety-critical class — false negatives (missed RI) cost lives.
-    Report this prominently in the paper.
-    """
-    pred_c = (preds == RI_CLASS)
-    label_c = (labels == RI_CLASS)
-    
-    tp = (pred_c & label_c).sum().float()
-    fp = (pred_c & ~label_c).sum().float()
-    fn = (~pred_c & label_c).sum().float()
-    tn = (~pred_c & ~label_c).sum().float()
-    
-    total = tp + fp + tn + fn
-    acc = torch.where(total > 0, (tp + tn) / total, torch.tensor(0.0, device=preds.device))
-    
-    # Handle edge cases natively on GPU
-    prec = torch.where(tp + fp > 0, tp / (tp + fp), torch.tensor(0.0, device=preds.device))
-    rec  = torch.where(tp + fn > 0, tp / (tp + fn), torch.tensor(0.0, device=preds.device))
-    f1   = torch.where(prec + rec > 0, 2 * prec * rec / (prec + rec), torch.tensor(0.0, device=preds.device))
-    
-    return float(acc.item()), float(prec.item()), float(rec.item()), float(f1.item())
 
 
 # ── Novel Metric: Basin Transfer Gap (BTG) ───────────────────────────────────
@@ -299,7 +273,7 @@ class BasinEvaluator:
         pd = torch.cat(self._preds_dir)
         ld = torch.cat(self._labels_dir)
 
-        pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=5)
+        pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=4)
         pd_p, pd_r, pd_f = weighted_metrics(pd, ld, n_classes=8)
 
         return BasinResult(

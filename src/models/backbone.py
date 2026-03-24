@@ -451,7 +451,7 @@ class TaskHeads(nn.Module):
     Designed to share the same backbone, with separate final layers.
     """
 
-    def __init__(self, in_dim: int = 128, n_intensity: int = 5, n_direction: int = 8,
+    def __init__(self, in_dim: int = 128, n_intensity: int = 4, n_direction: int = 8,
                  dropout: float = 0.1):
         super().__init__()
 

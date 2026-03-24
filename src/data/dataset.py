@@ -607,9 +607,9 @@ class TCNDDataset(Dataset):
         y_intensity = int(np.asarray(d.get("future_inte_change24", 2)).ravel()[0])
         y_direction = int(np.asarray(d.get("future_direction24",   0)).ravel()[0])
 
-        if y_intensity < 0: y_intensity = 2   # steady state
+        if y_intensity < 0: y_intensity = 2   # -1 sentinel → already filtered at index time
         if y_direction < 0: y_direction = 0
-        y_intensity = min(y_intensity, 4)
+        y_intensity = min(y_intensity, 3)      # cap at class 3 (4-class schema)
         y_direction = min(y_direction, 7)
 
         return env_vec, y_intensity, y_direction
