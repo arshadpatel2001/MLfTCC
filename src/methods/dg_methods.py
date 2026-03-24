@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 
 import time
 try:
-    from tqdm import tqdm
+    from tqdm.auto import tqdm
 except ImportError:
     def tqdm(x, **kwargs): return x
 

@@ -34,7 +34,7 @@ import time
 import copy
 import argparse
 try:
-    from tqdm import tqdm
+    from tqdm.auto import tqdm
 except ImportError:
     def tqdm(x, **kwargs): return x  # graceful fallback if tqdm not installed
 import logging
