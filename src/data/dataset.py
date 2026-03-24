@@ -116,6 +116,7 @@ NORM = {
 # module-level shared dictionary, the first method pays the I/O price,
 # and all subsequent methods hit RAM instantly.
 GLOBAL_CACHE: Dict = {}
+GLOBAL_INDEX_CACHE: Dict = {}
 
 
 class TCNDSample:
@@ -263,6 +264,15 @@ class TCNDDataset(Dataset):
         import logging
         log = logging.getLogger(__name__)
         
+        # ── Global Index Cache ────────────────────────────────────────────────
+        # Prevents repetitive 10-second OS-level `.txt` file system scanning during LOBO.
+        cache_key = f"{self.root}_{'-'.join(sorted(self.basins))}_{self.split}_{self.use_3d}_{self.use_env}"
+        if cache_key in GLOBAL_INDEX_CACHE:
+            self.index = GLOBAL_INDEX_CACHE[cache_key].copy()
+            self._tcnd_root = self._resolve_tcnd_root()
+            log.info(f"Dataset index instantly retrieved from GLOBAL_INDEX_CACHE ({len(self.index)} samples)")
+            return
+
         start_time = time.time()
 
         self._tcnd_root = self._resolve_tcnd_root()
@@ -357,6 +367,7 @@ class TCNDDataset(Dataset):
                     })
         
         log.info(f"Dataset index built in {time.time() - start_time:.2f}s with {len(self.index)} samples")
+        GLOBAL_INDEX_CACHE[cache_key] = self.index.copy()
 
     def _get_3d_path(self, basin: str, year: str, tc_name: str, ts: str) -> Optional[Path]:
         """

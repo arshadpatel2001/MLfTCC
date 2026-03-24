@@ -767,24 +767,33 @@ def _print_summary_table(results, methods, splits):
     ]
     
     for metric_title, src_key, tgt_key in metrics_to_print:
-        table_width = 14 + len(targets) * 22 + 22
-        print("\n" + "=" * table_width)
-        print(f"BASIN GENERALIZATION BENCHMARK — {metric_title} (Source vs Target)")
-        print("=" * table_width)
-
-        # Header 1: Target Basins
-        header1 = f"{'Method':<14}"
-        for t in targets:
-            header1 += f"{t:^22}"
-        header1 += f"{'Average':^22}"
-        print(header1)
+        is_single = len(targets) == 1
+        table_width = 14 + 22 if is_single else 14 + len(targets) * 22 + 22
         
-        # Header 2: Source / Target sub-columns
-        header2 = f"{'':<14}"
-        for _ in range(len(targets) + 1):
-            header2 += f"{'Source':>10} {'Target':>11}"
-        print(header2)
-        print("-" * table_width)
+        log.info("\n" + "=" * table_width)
+        log.info(f"BASIN GENERALIZATION BENCHMARK — {metric_title} (Source vs Target)")
+        log.info("=" * table_width)
+
+        if is_single:
+            t = targets[0]
+            header = f"{'Method':<14}{'Source':>10} {f'Test[{t}]':>11}"
+            log.info(header)
+        else:
+            # Header 1: Target Basins
+            header1 = f"{'Method':<14}"
+            for t in targets:
+                header1 += f"{t:^22}"
+            header1 += f"{'Average':^22}"
+            log.info(header1)
+            
+            # Header 2: Source / Target sub-columns
+            header2 = f"{'':<14}"
+            for t in targets:
+                header2 += f"{'Source':>10} {f'Test[{t}]':>11}"
+            header2 += f"{'Src Avg':>10} {'Test Avg':>11}"
+            log.info(header2)
+            
+        log.info("-" * table_width)
 
         for method in methods:
             row = f"{method:<14}"
@@ -803,12 +812,13 @@ def _print_summary_table(results, methods, splits):
                 else:
                     row += f"{'—':>10} {'—':>11}"
             
-            src_avg = sum(src_vals) / len(src_vals) if src_vals else 0
-            tgt_avg = sum(tgt_vals) / len(tgt_vals) if tgt_vals else 0
-            row += f"{src_avg:>10.3f} {tgt_avg:>11.3f}"
-            print(row)
+            if not is_single:
+                src_avg = sum(src_vals) / len(src_vals) if src_vals else 0
+                tgt_avg = sum(tgt_vals) / len(tgt_vals) if tgt_vals else 0
+                row += f"{src_avg:>10.3f} {tgt_avg:>11.3f}"
+            log.info(row)
 
-        print("=" * table_width)
+        log.info("=" * table_width)
 
 
 # ── Incremental Benchmark ─────────────────────────────────────────────────────
