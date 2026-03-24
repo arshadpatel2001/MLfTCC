@@ -445,7 +445,7 @@ class MAML(DGMethod):
         meta_losses = []
         for basin, batch in batches.items():
             n  = batch["data_1d"].shape[0]
-            if n < 2:
+            if n < 4:
                 continue
             n_s = n // 2
 

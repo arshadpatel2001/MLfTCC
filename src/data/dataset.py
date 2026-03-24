@@ -316,7 +316,9 @@ class TCNDDataset(Dataset):
                     data_3d_path = self._get_3d_path(basin, year, tc_name, ts)
                     env_path = self._get_env_path(basin, year, tc_name, ts)
                     
-                    if not (data_3d_path and env_path):
+                    if self.use_3d and not data_3d_path:
+                        continue
+                    if self.use_env and not env_path:
                         continue
                         
                     self.index.append({

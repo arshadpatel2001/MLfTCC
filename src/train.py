@@ -54,7 +54,8 @@ from data.dataset import (
 from models.backbone import TropiCycloneModel, MultimodalBackbone
 from methods.dg_methods import build_method, DANN, PhysIRM, METHOD_REGISTRY
 from metrics.basin_metrics import (
-    BasinEvaluator, TransferEvaluator, BasinResult
+    BasinEvaluator, TransferEvaluator, BasinResult,
+    basin_transfer_gap, basin_normalized_transfer_efficiency
 )
 
 logging.basicConfig(
@@ -441,9 +442,17 @@ def _train_one_experiment_inner(
     model.eval()
     if isinstance(method, torch.nn.Module):
         method.eval()
+
+    ev_final_src = BasinEvaluator("source_final")
     ev_final = BasinEvaluator(target_basin)
     final_ev_start = time.time()
     with torch.no_grad():
+        for batch in tqdm(val_loader_src, desc="Final Source Evaluation", leave=False, dynamic_ncols=True):
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in batch.items()}
+            out = model(batch)
+            ev_final_src.update(batch, out)
+
         for batch in tqdm(test_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
@@ -451,14 +460,21 @@ def _train_one_experiment_inner(
             ev_final.update(batch, out)
     log.info(f"Final evaluation took {time.time() - final_ev_start:.2f}s")
 
+    final_src = ev_final_src.compute()
     final = ev_final.compute()
+
+    btg = basin_transfer_gap(final_src.accuracy_intensity, final.accuracy_intensity)
+    bnte = basin_normalized_transfer_efficiency(final_src.accuracy_intensity, final.accuracy_intensity, 0.0)
 
     result = {
         "run_id":        run_id,
         "method":        method_name,
         "source_basins": source_basins,
         "target_basin":  target_basin,
+        "final source accuracy intensity": final_src.accuracy_intensity,
         "final target accuracy intensity": final.accuracy_intensity,
+        "btg":           btg,
+        "bnte":          bnte,
         "final target precision intensity": final.precision_intensity,
         "final target recall intensity": final.recall_intensity,
         "final target f1 intensity": final.f1_intensity,
@@ -548,53 +564,52 @@ def few_shot_finetune(
     )
     # Subsample to k_shots safely bounding to dataset size
     k_shots = min(k_shots, len(shot_ds))
-    if k_shots == 0:
-        log.warning(f"Target basin {target_basin} has 0 training samples! Skipping few-shot.")
-        ev = BasinEvaluator(target_basin)
-        return ev.compute()
-
-    # Fixed seed per k_shots value for reproducible k-shot subset selection.
-    rng_seed = 42 + k_shots
-    indices = torch.randperm(len(shot_ds),
-                             generator=torch.Generator().manual_seed(rng_seed))[:k_shots].tolist()
-    shot_subset = torch.utils.data.Subset(shot_ds, indices)
-    shot_loader = torch.utils.data.DataLoader(
-        shot_subset, batch_size=max(1, min(k_shots, 32)), shuffle=True
-    )
-
-    # Freeze backbone, fine-tune heads only
-    for p in model.backbone.parameters():
-        p.requires_grad_(False)
-    for p in model.heads.parameters():
-        p.requires_grad_(True)
-
-    ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
 
     # Save entire model state to strictly prevent contamination of the zero-shot baseline
     orig_state = copy.deepcopy(model.state_dict())
 
-    model.eval()
-    model.heads.train()
-    fs_start = time.time()
-    for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True):
-        ep_start = time.time()
-        for batch in tqdm(shot_loader, desc=f"Epoch {ep+1}/{ft_epochs}", leave=False, dynamic_ncols=True):
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in batch.items()}
-            ft_optimizer.zero_grad()
-            out = model(batch)
-            loss = task_loss(
-                out["logits_intensity"], out["logits_direction"],
-                batch["y_intensity"], batch["y_direction"]
-            )
-            loss.backward()
-            ft_optimizer.step()
-        log.info(f"Few-shot Epoch {ep+1} took {time.time() - ep_start:.2f}s")
-    log.info(f"Total few-shot fine-tuning took {time.time() - fs_start:.2f}s")
+    if k_shots > 0:
+        # Fixed seed per k_shots value for reproducible k-shot subset selection.
+        rng_seed = 42 + k_shots
+        indices = torch.randperm(len(shot_ds),
+                                 generator=torch.Generator().manual_seed(rng_seed))[:k_shots].tolist()
+        shot_subset = torch.utils.data.Subset(shot_ds, indices)
+        shot_loader = torch.utils.data.DataLoader(
+            shot_subset, batch_size=max(1, min(k_shots, 32)), shuffle=True
+        )
 
-    # Unfreeze
-    for p in model.backbone.parameters():
-        p.requires_grad_(True)
+        # Freeze backbone, fine-tune heads only
+        for p in model.backbone.parameters():
+            p.requires_grad_(False)
+        for p in model.heads.parameters():
+            p.requires_grad_(True)
+
+        ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
+
+        model.eval()
+        model.heads.train()
+        fs_start = time.time()
+        for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True):
+            ep_start = time.time()
+            for batch in tqdm(shot_loader, desc=f"Epoch {ep+1}/{ft_epochs}", leave=False, dynamic_ncols=True):
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                         for k, v in batch.items()}
+                ft_optimizer.zero_grad()
+                out = model(batch)
+                loss = task_loss(
+                    out["logits_intensity"], out["logits_direction"],
+                    batch["y_intensity"], batch["y_direction"]
+                )
+                loss.backward()
+                ft_optimizer.step()
+            log.info(f"Few-shot Epoch {ep+1} took {time.time() - ep_start:.2f}s")
+        log.info(f"Total few-shot fine-tuning took {time.time() - fs_start:.2f}s")
+
+        # Unfreeze
+        for p in model.backbone.parameters():
+            p.requires_grad_(True)
+    else:
+        log.info(f"Target basin {target_basin} k_shots=0. Skipping few-shot fine-tuning.")
 
     # Evaluate
     test_loader = make_dataloader(
