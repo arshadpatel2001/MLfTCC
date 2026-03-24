@@ -819,6 +819,10 @@ def parse_args():
 \033[1;33mAVAILABLE BASINS:\033[0m
   \033[1;34m{', '.join(BASIN_CODES)}\033[0m
 
+\033[1;33mPRO TIP:\033[0m
+  On high-end GPUs like \033[1;32mA100/H100\033[0m, use \033[1m--num_workers 8\033[0m or higher 
+  to prevent data loading bottlenecks.
+
 \033[1;33mAVAILABLE METHODS:\033[0m
   \033[1;34merm, irm, vrex, coral, dann, maml, physirm\033[0m
 """
@@ -832,8 +836,8 @@ def parse_args():
                    help="Path to TCND root directory")
     p.add_argument("--output_dir", type=str, default="./runs",
                    help="Directory for checkpoints and results")
-    p.add_argument("--num_workers", type=int, default=4,
-                   help="Number of dataloader workers for data loading")
+    p.add_argument("--num_workers", type=int, default=8,
+                   help="Number of dataloader workers (Pro tip: 8+ for A100/H100)")
 
     # Experiment
     p.add_argument("--mode", choices=["lobo", "single", "incremental"], default="lobo",

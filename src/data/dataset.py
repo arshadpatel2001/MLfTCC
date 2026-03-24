@@ -26,6 +26,17 @@ except ImportError:
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+# Geoscience data loading
+try:
+    import xarray as xr
+except ImportError:
+    xr = None
+
+try:
+    import netCDF4 as nc
+except ImportError:
+    nc = None
+
 
 # ── Basin registry ────────────────────────────────────────────────────────────
 BASIN_CODES = ["WP", "NA", "EP", "NI", "SI", "SP"]
@@ -420,19 +431,39 @@ class TCNDDataset(Dataset):
         SST is in Kelvin with large fill values (~9.97e36) for land/missing.
         Returns (13, H, W) tensor: [u×4, v×4, z×4, sst]
         """
-        import xarray as xr
-        ds = xr.open_dataset(path)
+        if nc is not None:
+            # Use netCDF4 for raw speed (significantly faster metadata/open than xarray)
+            ds = nc.Dataset(path, 'r')
+            
+            # SST: (1, H, W) or (H, W)
+            sst_var = ds.variables["sst"]
+            sst_raw = sst_var[:].astype(np.float32)
+            if sst_raw.ndim == 3: 
+                sst_raw = sst_raw[0]
+            
+            # z, u, v: (1, 4, H, W)
+            z = ds.variables["z"][:].astype(np.float32)
+            u = ds.variables["u"][:].astype(np.float32)
+            v = ds.variables["v"][:].astype(np.float32)
+            ds.close()
+            
+            if z.ndim == 4: z = z[0]
+            if u.ndim == 4: u = u[0]
+            if v.ndim == 4: v = v[0]
+        elif xr is not None:
+            # Fallback to xarray if netCDF4 is missing (slower)
+            ds = xr.open_dataset(path)
+            sst_raw = ds["sst"].values.astype(np.float32)
+            if sst_raw.ndim == 3: sst_raw = sst_raw[0]
+            z = ds["z"].values.astype(np.float32)
+            u = ds["u"].values.astype(np.float32)
+            v = ds["v"].values.astype(np.float32)
+            ds.close()
+        else:
+            raise ImportError("Neither 'netCDF4' nor 'xarray' is installed. At least one is required to load .nc files.")
 
-        # ── SST: (H, W) or (time=1, H, W), Kelvin, has large fill values ──────
-        sst_raw = ds["sst"].values.astype(np.float32)
-        if sst_raw.ndim == 3: sst_raw = sst_raw[0]  # (time, H, W) → (H, W)
-        sst_raw[sst_raw > 1e10] = np.nan          # mask fill values
-
-        # ── z, u, v: (1, 4, H, W) → (4, H, W) ──────────────────────────────
-        z = ds["z"].values.astype(np.float32)
-        u = ds["u"].values.astype(np.float32)
-        v = ds["v"].values.astype(np.float32)
-        ds.close()
+        # mask large fill values (> 1e10)
+        sst_raw[sst_raw > 1e10] = np.nan
 
         if z.ndim == 4: z = z[0]
         if u.ndim == 4: u = u[0]
@@ -449,16 +480,24 @@ class TCNDDataset(Dataset):
 
         data_3d = np.stack(chs, axis=0)
 
-        # Per-channel normalisation per-sample (notebook method)
+        # Vectorized per-channel normalisation per-sample (replaces the 13-iteration loop)
+        # data_3d shape: (13, 81, 81)
+        # mask is (13, 81, 81)
+        nan_mask = np.isnan(data_3d)
+        
+        # Calculate mean/std for each channel, ignoring NaNs
+        # We use a masked array to simplify mean/std across channels
+        masked_data = np.ma.masked_array(data_3d, mask=nan_mask)
+        mus = masked_data.mean(axis=(1, 2)).data     # (13,)
+        stds = masked_data.std(axis=(1, 2)).data   # (13,)
+        stds = np.maximum(stds, 1e-6)
+        
+        # Fill NaNs with channel means
         for c in range(13):
-            ch = data_3d[c]
-            valid = ch[~np.isnan(ch)]
-            if len(valid) > 0:
-                mu, std = valid.mean(), max(valid.std(), 1e-6)
-                ch[np.isnan(ch)] = mu
-                data_3d[c] = (ch - mu) / std
-            else:
-                data_3d[c] = np.zeros_like(ch)
+            data_3d[c][nan_mask[c]] = mus[c]
+            
+        # Standardize: (X - mu) / std
+        data_3d = (data_3d - mus[:, None, None]) / stds[:, None, None]
 
         return torch.from_numpy(data_3d)  # (13, H, W)
 
@@ -661,6 +700,8 @@ def make_dataloader(
         ds, batch_size=safe_bs, shuffle=shuffle,
         num_workers=num_workers, pin_memory=torch.cuda.is_available(),
         drop_last=drop_last,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
 
