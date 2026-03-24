@@ -260,8 +260,11 @@ def _train_one_experiment_inner(
 
     # ── Optimizer / scheduler ─────────────────────────────────────────────────
     all_params = list(model.parameters()) + extra_params
+    
+    fused_kwargs = {"fused": True} if device.type == "cuda" and "fused" in optim.AdamW.__init__.__code__.co_varnames else {}
     optimizer  = optim.AdamW(all_params, lr=hp["lr"],
-                             weight_decay=hp.get("weight_decay", 1e-4))
+                             weight_decay=hp.get("weight_decay", 1e-4),
+                             **fused_kwargs)
     scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda")) if device.type == "cuda" else None
@@ -607,7 +610,8 @@ def few_shot_finetune(
         for p in model.heads.parameters():
             p.requires_grad_(True)
 
-        ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
+        fused_kwargs = {"fused": True} if device.type == "cuda" and "fused" in optim.Adam.__init__.__code__.co_varnames else {}
+        ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr, **fused_kwargs)
         scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda")) if device.type == "cuda" else None
 
         model.eval()

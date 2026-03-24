@@ -82,7 +82,7 @@ class DGMethod(ABC):
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
         device: Optional[torch.device] = None,
     ) -> dict:
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         env_device = device if device is not None else next(model.parameters()).device
         
         with torch.autocast(device_type="cuda" if env_device.type == "cuda" else "cpu", enabled=(env_device.type == "cuda")):
@@ -372,7 +372,7 @@ class DANN(DGMethod, nn.Module):
         # Discriminator parameters should be included in the joint optimizer
         # (caller creates a joint optimizer with disc params included).
         # _step is managed internally by compute_loss(); do NOT overwrite it.
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         env_device = device if device is not None else next(model.parameters()).device
         
         with torch.autocast(device_type="cuda" if env_device.type == "cuda" else "cpu", enabled=(env_device.type == "cuda")):
