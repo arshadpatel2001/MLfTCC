@@ -79,12 +79,26 @@ class DGMethod(ABC):
         batches: Dict[str, dict],
         model: nn.Module,
         step: int = 0,
+        scaler: Optional[torch.cuda.amp.GradScaler] = None,
+        device: Optional[torch.device] = None,
     ) -> dict:
         optimizer.zero_grad()
-        loss, metrics = self.compute_loss(batches, model)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        env_device = device if device is not None else next(model.parameters()).device
+        
+        with torch.autocast(device_type="cuda" if env_device.type == "cuda" else "cpu", enabled=(env_device.type == "cuda")):
+            loss, metrics = self.compute_loss(batches, model)
+            
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
         metrics["loss"] = loss.item()
         return metrics
 
@@ -354,16 +368,29 @@ class DANN(DGMethod, nn.Module):
             "dann_alpha": alpha,
         }
 
-    def update(self, optimizer, batches, model, step=0):
+    def update(self, optimizer, batches, model, step=0, scaler=None, device=None):
         # Discriminator parameters should be included in the joint optimizer
         # (caller creates a joint optimizer with disc params included).
         # _step is managed internally by compute_loss(); do NOT overwrite it.
         optimizer.zero_grad()
-        loss, metrics = self.compute_loss(batches, model)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
-        optimizer.step()
+        env_device = device if device is not None else next(model.parameters()).device
+        
+        with torch.autocast(device_type="cuda" if env_device.type == "cuda" else "cpu", enabled=(env_device.type == "cuda")):
+            loss, metrics = self.compute_loss(batches, model)
+            
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
+            optimizer.step()
+            
         metrics["loss"] = loss.item()
         return metrics
 
@@ -638,14 +665,27 @@ class PhysIRM(DGMethod, nn.Module):
             "irm_lambda":    lam,
         }
 
-    def update(self, optimizer, batches, model, step=0):
+    def update(self, optimizer, batches, model, step=0, scaler=None, device=None):
         # _step is managed internally by compute_loss(); do NOT overwrite it.
         optimizer.zero_grad()
-        loss, metrics = self.compute_loss(batches, model)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        torch.nn.utils.clip_grad_norm_(self.phys_predictor.parameters(), max_norm=1.0)
-        optimizer.step()
+        env_device = device if device is not None else next(model.parameters()).device
+        
+        with torch.autocast(device_type="cuda" if env_device.type == "cuda" else "cpu", enabled=(env_device.type == "cuda")):
+            loss, metrics = self.compute_loss(batches, model)
+            
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.phys_predictor.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.phys_predictor.parameters(), max_norm=1.0)
+            optimizer.step()
+            
         metrics["loss"] = loss.item()
         return metrics
 

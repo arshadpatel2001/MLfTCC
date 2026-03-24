@@ -69,13 +69,17 @@ log = logging.getLogger(__name__)
 def select_device(args) -> torch.device:
     """Select compute device respecting --device flag."""
     if hasattr(args, 'device') and args.device and args.device != "auto":
-        return torch.device(args.device)
-    # Auto-select best available device: CUDA > MPS (Apple Silicon) > CPU
-    if torch.cuda.is_available():
-        return torch.device("cuda")
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
     elif torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+        
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    return device
 
 
 # ── Experiment configurations ─────────────────────────────────────────────────
@@ -193,12 +197,14 @@ def _train_one_experiment_inner(
         num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm,
+        cache=getattr(args, "cache_data", False),
     )
     val_loader_src = make_dataloader(
         root=args.data_root, basins=source_basins,
         split="val", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm,
+        cache=getattr(args, "cache_data", False),
     )
     # val_loader_tgt: used for training-time monitoring only (split="val").
     # test_loader_tgt: used ONLY for the final best-model evaluation (split="test").
@@ -208,12 +214,14 @@ def _train_one_experiment_inner(
         split="val", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm,
+        cache=getattr(args, "cache_data", False),
     )
     test_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
         split="test", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm,
+        cache=getattr(args, "cache_data", False),
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -255,6 +263,8 @@ def _train_one_experiment_inner(
     optimizer  = optim.AdamW(all_params, lr=hp["lr"],
                              weight_decay=hp.get("weight_decay", 1e-4))
     scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda")) if device.type == "cuda" else None
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_f1 = -1.0
@@ -304,7 +314,7 @@ def _train_one_experiment_inner(
                     for k, v in batch.items()
                 }
 
-            metrics = method.update(optimizer, batches, model, step=step)
+            metrics = method.update(optimizer, batches, model, step=step, scaler=scaler, device=device)
             step   += 1
 
             for k, v in metrics.items():
@@ -340,15 +350,17 @@ def _train_one_experiment_inner(
             val_start = time.time()
             with torch.no_grad():
                 for batch in tqdm(val_loader_src, desc="Validation Source", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
-                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
-                    out = model(batch)
+                    with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=(device.type == "cuda")):
+                        out = model(batch)
                     ev_src.update(batch, out)
 
                 for batch in tqdm(val_loader_tgt, desc="Validation Target", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
-                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
-                    out = model(batch)
+                    with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=(device.type == "cuda")):
+                        out = model(batch)
                     ev_tgt.update(batch, out)
             val_time = time.time() - val_start
             log.info(f"Validation took {val_time:.2f}s")
@@ -455,15 +467,17 @@ def _train_one_experiment_inner(
     final_ev_start = time.time()
     with torch.no_grad():
         for batch in tqdm(val_loader_src, desc="Final Source Evaluation", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+            batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            out = model(batch)
+            with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=(device.type == "cuda")):
+                out = model(batch)
             ev_final_src.update(batch, out)
 
         for batch in tqdm(test_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+            batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            out = model(batch)
+            with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=(device.type == "cuda")):
+                out = model(batch)
             ev_final.update(batch, out)
     log.info(f"Final evaluation took {time.time() - final_ev_start:.2f}s")
 
@@ -569,6 +583,7 @@ def few_shot_finetune(
     shot_ds = TCNDDataset(
         root=args.data_root, basins=[target_basin],
         split="train", use_3d=not args.no_3d, use_env=not args.no_env,
+        cache=getattr(args, "cache_data", False),
     )
     # Subsample to k_shots safely bounding to dataset size
     k_shots = min(k_shots, len(shot_ds))
@@ -593,6 +608,7 @@ def few_shot_finetune(
             p.requires_grad_(True)
 
         ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr)
+        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda")) if device.type == "cuda" else None
 
         model.eval()
         model.heads.train()
@@ -600,16 +616,22 @@ def few_shot_finetune(
         for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             ep_start = time.time()
             for batch in tqdm(shot_loader, desc=f"Epoch {ep+1}/{ft_epochs}", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
                 ft_optimizer.zero_grad()
-                out = model(batch)
-                loss = task_loss(
-                    out["logits_intensity"], out["logits_direction"],
-                    batch["y_intensity"], batch["y_direction"]
-                )
-                loss.backward()
-                ft_optimizer.step()
+                with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=(device.type == "cuda")):
+                    out = model(batch)
+                    loss = task_loss(
+                        out["logits_intensity"], out["logits_direction"],
+                        batch["y_intensity"], batch["y_direction"]
+                    )
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(ft_optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    ft_optimizer.step()
             log.info(f"Few-shot Epoch {ep+1} took {time.time() - ep_start:.2f}s")
         log.info(f"Total few-shot fine-tuning took {time.time() - fs_start:.2f}s")
 
@@ -625,15 +647,17 @@ def few_shot_finetune(
         split="test", batch_size=64, num_workers=0,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm,
+        cache=getattr(args, "cache_data", False),
     )
     ev = BasinEvaluator(target_basin)
     model.eval()
     fs_eval_start = time.time()
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Few-shot Evaluation", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+            batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            out = model(batch)
+            with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=(device.type == "cuda")):
+                out = model(batch)
             ev.update(batch, out)
     log.info(f"Few-shot evaluation took {time.time() - fs_eval_start:.2f}s")
 
@@ -895,6 +919,8 @@ def parse_args():
     # Performance
     p.add_argument("--compile", action="store_true",
                    help="Enable PyTorch 2.0 torch.compile for A100/H100 speedup")
+    p.add_argument("--cache_data", action="store_true",
+                   help="Cache the entire dataset in RAM to prevent I/O bottlenecks. Requires ~50GB RAM.")
 
     # Few-shot
     p.add_argument("--few_shot",      action="store_true",
