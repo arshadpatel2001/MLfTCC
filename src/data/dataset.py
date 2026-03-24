@@ -684,12 +684,18 @@ def make_dataloader(
     use_env: bool = True,
     seed: int = 42,
     disable_tqdm: bool = False,
+    cache: bool = False,
     **kwargs,
 ) -> DataLoader:
+    # If caching, we MUST disable multiprocessing to allow the main thread 
+    # to maintain a single memory space. Otherwise, 8 workers = 8 isolated caches.
+    if cache:
+        num_workers = 0
+        
     ds = TCNDDataset(
         root=root, basins=basins, split=split,
         use_3d=use_3d, use_env=use_env, seed=seed,
-        disable_tqdm=disable_tqdm, **kwargs
+        disable_tqdm=disable_tqdm, cache=cache, **kwargs
     )
     if len(ds) == 0:
         raise RuntimeError(
@@ -717,10 +723,11 @@ def make_per_basin_loaders(
     batch_size: int = 64,
     num_workers: int = 4,
     disable_tqdm: bool = False,
+    cache: bool = False,
     **kwargs,
 ) -> Dict[str, DataLoader]:
     """Return one DataLoader per basin (used for per-environment IRM updates)."""
     return {
-        b: make_dataloader(root, [b], split, batch_size, num_workers, disable_tqdm=disable_tqdm, **kwargs)
+        b: make_dataloader(root, [b], split, batch_size, num_workers, disable_tqdm=disable_tqdm, cache=cache, **kwargs)
         for b in basins
     }
