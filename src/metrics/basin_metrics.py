@@ -113,52 +113,63 @@ class TransferResult:
 
 # ── Core metric functions ─────────────────────────────────────────────────────
 
-def accuracy(preds: np.ndarray, labels: np.ndarray) -> float:
+def accuracy(preds: torch.Tensor, labels: torch.Tensor) -> float:
     if len(preds) == 0: return 0.0
-    return float((preds == labels).mean())
+    return float((preds == labels).float().mean().item())
 
 
-def weighted_metrics(preds: np.ndarray, labels: np.ndarray, n_classes: int) -> Tuple[float, float, float]:
+def weighted_metrics(preds: torch.Tensor, labels: torch.Tensor, n_classes: int) -> Tuple[float, float, float]:
     """Weighted Precision, Recall, and F1 score (weighted by class support / frequency)."""
-    from collections import Counter
     if len(labels) == 0: return 0.0, 0.0, 0.0
-    support = Counter(labels)
-    total   = len(labels)
 
-    precs, recs, f1s, weights = [], [], [], []
-    for c in range(n_classes):
-        tp = float(((preds == c) & (labels == c)).sum())
-        fp = float(((preds == c) & (labels != c)).sum())
-        fn = float(((preds != c) & (labels == c)).sum())
-        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-        
-        precs.append(prec)
-        recs.append(rec)
-        f1s.append(f1)
-        weights.append(support[c] / total)
+    # ── Fully Vectorized Confusion Matrix ─────────────────────────────────────
+    # Computes precision and recall for all classes simultaneously on the GPU!
+    indices = labels * n_classes + preds
+    conf_matrix = torch.bincount(indices, minlength=n_classes * n_classes).reshape(n_classes, n_classes).float()
+    
+    tp = conf_matrix.diag()
+    fp = conf_matrix.sum(dim=0) - tp
+    fn = conf_matrix.sum(dim=1) - tp
+    
+    prec_denom = tp + fp
+    prec = torch.where(prec_denom > 0, tp / prec_denom, torch.zeros_like(tp))
+    
+    rec_denom = tp + fn
+    rec = torch.where(rec_denom > 0, tp / rec_denom, torch.zeros_like(tp))
+    
+    f1_denom = prec + rec
+    f1 = torch.where(f1_denom > 0, 2 * prec * rec / f1_denom, torch.zeros_like(tp))
+    
+    support = conf_matrix.sum(dim=1)
+    weights = support / support.sum()
+    
+    # 3 final PCIe syncs total
+    w_prec = (prec * weights).sum().item()
+    w_rec  = (rec * weights).sum().item()
+    w_f1   = (f1 * weights).sum().item()
 
-    return float(np.dot(precs, weights)), float(np.dot(recs, weights)), float(np.dot(f1s, weights))
+    return float(w_prec), float(w_rec), float(w_f1)
 
 
-def ri_metrics(preds: np.ndarray, labels: np.ndarray) -> Tuple[float, float, float]:
+def ri_metrics(preds: torch.Tensor, labels: torch.Tensor) -> Tuple[float, float, float]:
     """
     Precision, Recall, F1 for Rapid Intensification (class 4).
     This is the safety-critical class — false negatives (missed RI) cost lives.
     Report this prominently in the paper.
     """
-    tp = ((preds == RI_CLASS) & (labels == RI_CLASS)).sum()
-    fp = ((preds == RI_CLASS) & (labels != RI_CLASS)).sum()
-    fn = ((preds != RI_CLASS) & (labels == RI_CLASS)).sum()
+    pred_c = (preds == RI_CLASS)
+    label_c = (labels == RI_CLASS)
     
-    # Handle edge cases where there are no RI samples or predictions
-    # This prevents mathematically meaningless results (0/1e-8) when RI is absent.
-    prec = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
-    rec  = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
-    f1   = float(2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    tp = (pred_c & label_c).sum().float()
+    fp = (pred_c & ~label_c).sum().float()
+    fn = (~pred_c & label_c).sum().float()
     
-    return prec, rec, f1
+    # Handle edge cases natively on GPU
+    prec = torch.where(tp + fp > 0, tp / (tp + fp), torch.tensor(0.0, device=preds.device))
+    rec  = torch.where(tp + fn > 0, tp / (tp + fn), torch.tensor(0.0, device=preds.device))
+    f1   = torch.where(prec + rec > 0, 2 * prec * rec / (prec + rec), torch.tensor(0.0, device=preds.device))
+    
+    return float(prec.item()), float(rec.item()), float(f1.item())
 
 
 # ── Novel Metric: Basin Transfer Gap (BTG) ───────────────────────────────────
@@ -260,21 +271,19 @@ class BasinEvaluator:
     def __init__(self, basin_name: str = "unknown", collect_features: bool = False):
         self.basin_name = basin_name
         self._collect_features = collect_features
-        self._preds_int  : List[int] = []
-        self._labels_int : List[int] = []
-        self._preds_dir  : List[int] = []
-        self._labels_dir : List[int] = []
+        self._preds_int  : List[torch.Tensor] = []
+        self._labels_int : List[torch.Tensor] = []
+        self._preds_dir  : List[torch.Tensor] = []
+        self._labels_dir : List[torch.Tensor] = []
         self._features   : List[torch.Tensor] = []
 
     def update(self, batch: dict, out: dict):
-        self._preds_int.extend(
-            out["logits_intensity"].argmax(-1).cpu().numpy().tolist()
-        )
-        self._labels_int.extend(batch["y_intensity"].cpu().numpy().tolist())
-        self._preds_dir.extend(
-            out["logits_direction"].argmax(-1).cpu().numpy().tolist()
-        )
-        self._labels_dir.extend(batch["y_direction"].cpu().numpy().tolist())
+        self._preds_int.append(out["logits_intensity"].argmax(-1).detach())
+        self._labels_int.append(batch["y_intensity"].detach())
+        
+        self._preds_dir.append(out["logits_direction"].argmax(-1).detach())
+        self._labels_dir.append(batch["y_direction"].detach())
+        
         if self._collect_features and "z" in out:
             self._features.append(out["z"].detach().cpu())
 
@@ -288,10 +297,10 @@ class BasinEvaluator:
                 accuracy_direction=0.0, precision_direction=0.0, recall_direction=0.0, f1_direction=0.0,
                 rapid_intensification_recall=0.0, rapid_intensification_precision=0.0, rapid_intensification_f1=0.0,
             )
-        pi = np.array(self._preds_int)
-        li = np.array(self._labels_int)
-        pd = np.array(self._preds_dir)
-        ld = np.array(self._labels_dir)
+        pi = torch.cat(self._preds_int)
+        li = torch.cat(self._labels_int)
+        pd = torch.cat(self._preds_dir)
+        ld = torch.cat(self._labels_dir)
 
         ri_p, ri_r, ri_f = ri_metrics(pi, li)
         pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=5)

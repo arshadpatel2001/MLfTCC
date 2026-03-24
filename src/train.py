@@ -734,36 +734,45 @@ def run_lobo_benchmark(args):
 
 
 def _print_summary_table(results, methods, splits):
-    """Print a NeurIPS-style results table."""
+    """Print a NeurIPS-style results table for multiple core metrics."""
     targets = [s["target"] for s in splits]
-    print("\n" + "=" * 90)
-    print("BASIN GENERALIZATION BENCHMARK — Zero-Shot Transfer (Accuracy-Intensity)")
-    print("=" * 90)
+    
+    metrics_to_print = [
+        ("Intensity Accuracy", "final target accuracy intensity"),
+        ("Intensity Macro F1", "final target f1 intensity"),
+        ("Rapid Intensification F1", "final target rapid intensification f1"),
+        ("Direction Accuracy", "final target accuracy direction")
+    ]
+    
+    for metric_title, metric_key in metrics_to_print:
+        print("\n" + "=" * 90)
+        print(f"BASIN GENERALIZATION BENCHMARK — Zero-Shot Transfer ({metric_title})")
+        print("=" * 90)
 
-    header = f"{'Method':<12}" + "".join(f"{t:>8}" for t in targets) + f"{'Average':>10}"
-    print(header)
-    print("-" * len(header))
+        header = f"{'Method':<12}" + "".join(f"{t:>12}" for t in targets) + f"{'Average':>12}"
+        print(header)
+        print("-" * len(header))
 
-    for method in methods:
-        row = f"{method:<12}"
-        accs = []
-        for t in targets:
-            r = next(
-                (x for x in results
-                 if x["method"] == method and x["target_basin"] == t),
-                None
-            )
-            if r:
-                acc = r["final target accuracy intensity"]
-                accs.append(acc)
-                row += f"{acc:>8.3f}"
-            else:
-                row += f"{'—':>8}"
-        avg = sum(accs) / len(accs) if accs else 0
-        row += f"{avg:>10.3f}"
-        print(row)
+        for method in methods:
+            row = f"{method:<12}"
+            vals = []
+            for t in targets:
+                r = next(
+                    (x for x in results
+                     if x["method"] == method and x["target_basin"] == t),
+                    None
+                )
+                if r and metric_key in r:
+                    val = r[metric_key]
+                    vals.append(val)
+                    row += f"{val:>12.3f}"
+                else:
+                    row += f"{'—':>12}"
+            avg = sum(vals) / len(vals) if vals else 0
+            row += f"{avg:>12.3f}"
+            print(row)
 
-    print("=" * 90)
+        print("=" * 90)
 
 
 # ── Incremental Benchmark ─────────────────────────────────────────────────────
