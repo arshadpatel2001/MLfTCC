@@ -62,18 +62,14 @@ class BasinResult:
     """Per-basin evaluation result."""
     basin:        str
     n_samples:    int
-    accuracy_intensity: float  # intensity accuracy
+    accuracy_intensity:  float
     precision_intensity: float
-    recall_intensity: float
-    f1_intensity:       float  # weighted F1 for intensity
-    accuracy_direction: float  # direction accuracy
+    recall_intensity:    float
+    f1_intensity:        float
+    accuracy_direction:  float
     precision_direction: float
-    recall_direction: float
-    f1_direction: float
-    rapid_intensification_accuracy:  float  # accuracy on RI class (class 4)
-    rapid_intensification_recall:    float  # recall on RI class (class 4)
-    rapid_intensification_precision: float
-    rapid_intensification_f1:        float
+    recall_direction:    float
+    f1_direction:        float
 
 
 @dataclass
@@ -102,7 +98,6 @@ class TransferResult:
     target_precision_direction: float
     target_recall_direction: float
     target_f1_direction: float
-    target_rapid_intensification_f1:     float
 
     # Proposed metrics
     btg:   float  # Basin Transfer Gap
@@ -294,38 +289,30 @@ class BasinEvaluator:
 
     def compute(self) -> BasinResult:
         if not self._preds_int:
-            # Evaluator was never updated — return a zero-filled result rather
-            # than crashing with NaN from numpy mean on an empty array.
             return BasinResult(
                 basin=self.basin_name, n_samples=0,
                 accuracy_intensity=0.0, precision_intensity=0.0, recall_intensity=0.0, f1_intensity=0.0,
                 accuracy_direction=0.0, precision_direction=0.0, recall_direction=0.0, f1_direction=0.0,
-                rapid_intensification_accuracy=0.0, rapid_intensification_recall=0.0, rapid_intensification_precision=0.0, rapid_intensification_f1=0.0,
             )
         pi = torch.cat(self._preds_int)
         li = torch.cat(self._labels_int)
         pd = torch.cat(self._preds_dir)
         ld = torch.cat(self._labels_dir)
 
-        ri_a, ri_p, ri_r, ri_f = ri_metrics(pi, li)
         pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=5)
         pd_p, pd_r, pd_f = weighted_metrics(pd, ld, n_classes=8)
 
         return BasinResult(
             basin        = self.basin_name,
             n_samples    = len(pi),
-            accuracy_intensity = accuracy(pi, li),
+            accuracy_intensity  = accuracy(pi, li),
             precision_intensity = pi_p,
-            recall_intensity = pi_r,
-            f1_intensity       = pi_f,
-            accuracy_direction = accuracy(pd, ld),
+            recall_intensity    = pi_r,
+            f1_intensity        = pi_f,
+            accuracy_direction  = accuracy(pd, ld),
             precision_direction = pd_p,
-            recall_direction = pd_r,
-            f1_direction       = pd_f,
-            rapid_intensification_accuracy  = ri_a,
-            rapid_intensification_recall    = ri_r,
-            rapid_intensification_precision = ri_p,
-            rapid_intensification_f1        = ri_f,
+            recall_direction    = pd_r,
+            f1_direction        = pd_f,
         )
 
     def get_features(self) -> Optional[torch.Tensor]:
@@ -456,7 +443,6 @@ class TransferEvaluator:
             target_precision_direction = target_r.precision_direction,
             target_recall_direction    = target_r.recall_direction,
             target_f1_direction        = target_r.f1_direction,
-            target_rapid_intensification_f1    = target_r.rapid_intensification_f1,
             btg             = btg,
             bnte            = bnte,
             per_basin       = per_basin_results,
@@ -467,12 +453,12 @@ class TransferEvaluator:
     def print_table(self, results: Optional[List[TransferResult]] = None):
         """
         Print a LaTeX-style results table (for copy-paste into the paper).
-        Columns: Method | Target Basin | Accuracy Intensity | Accuracy Direction | Rapid Intensification F1 | Basin Transfer Gap | Basin-Normalized Transfer Efficiency
+        Columns: Method | Target Basin | Accuracy Intensity | Accuracy Direction | Basin Transfer Gap | Basin-Normalized Transfer Efficiency
         """
         rs = results or self.results
         header = (
             f"{'Method':<20} {'Target':<10} {'Accuracy Intensity':>20} {'Accuracy Direction':>20} "
-            f"{'Rapid Intensification F1':>30} {'Basin Transfer Gap':>20} {'Basin-Normalized Transfer Efficiency':>38}"
+            f"{'Basin Transfer Gap':>20} {'Basin-Normalized Transfer Efficiency':>38}"
         )
         sep = "─" * len(header)
         print(sep)
@@ -482,7 +468,7 @@ class TransferEvaluator:
             print(
                 f"{r.method:<20} {r.target_basin:<10} "
                 f"{r.target_accuracy_intensity:>20.3f} {r.target_accuracy_direction:>20.3f} "
-                f"{r.target_rapid_intensification_f1:>30.3f} {r.btg:>20.3f} {r.bnte:>38.3f}"
+                f"{r.btg:>20.3f} {r.bnte:>38.3f}"
             )
         print(sep)
 
@@ -500,7 +486,6 @@ class TransferEvaluator:
                 "target precision direction": r.target_precision_direction,
                 "target recall direction": r.target_recall_direction,
                 "target f1 direction": r.target_f1_direction,
-                "target rapid intensification f1":   r.target_rapid_intensification_f1,
                 "btg":     r.btg,
                 "bnte":    r.bnte,
             }

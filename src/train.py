@@ -500,10 +500,6 @@ def _train_one_experiment_inner(
         "final source precision intensity": final_src.precision_intensity,
         "final source recall intensity": final_src.recall_intensity,
         "final source f1 intensity": final_src.f1_intensity,
-        "final source rapid intensification accuracy": final_src.rapid_intensification_accuracy,
-        "final source rapid intensification precision": final_src.rapid_intensification_precision,
-        "final source rapid intensification recall": final_src.rapid_intensification_recall,
-        "final source rapid intensification f1": final_src.rapid_intensification_f1,
         "final source accuracy direction": final_src.accuracy_direction,
         "final source precision direction": final_src.precision_direction,
         "final source recall direction": final_src.recall_direction,
@@ -518,10 +514,6 @@ def _train_one_experiment_inner(
         "final target precision direction": final.precision_direction,
         "final target recall direction": final.recall_direction,
         "final target f1 direction": final.f1_direction,
-        "final target rapid intensification accuracy": final.rapid_intensification_accuracy,
-        "final target rapid intensification precision": final.rapid_intensification_precision,
-        "final target rapid intensification recall": final.rapid_intensification_recall,
-        "final target rapid intensification f1": final.rapid_intensification_f1,
         "history":       history,
         "best_ckpt":     best_ckpt,
     }
@@ -540,17 +532,10 @@ def _train_one_experiment_inner(
         result["few_shot target precision intensity"] = fs_result.precision_intensity
         result["few_shot target recall intensity"] = fs_result.recall_intensity
         result["few_shot target f1 intensity"] = fs_result.f1_intensity
-        
         result["few_shot target accuracy direction"] = fs_result.accuracy_direction
         result["few_shot target precision direction"] = fs_result.precision_direction
         result["few_shot target recall direction"] = fs_result.recall_direction
         result["few_shot target f1 direction"] = fs_result.f1_direction
-        
-        result["few_shot target rapid intensification accuracy"] = fs_result.rapid_intensification_accuracy
-        result["few_shot target rapid intensification precision"] = fs_result.rapid_intensification_precision
-        result["few_shot target rapid intensification recall"] = fs_result.rapid_intensification_recall
-        result["few_shot target rapid intensification f1"] = fs_result.rapid_intensification_f1
-        
         log.info(
             f"Few-shot ({args.k_shots} shots) on {target_basin}: "
             f"target accuracy intensity={fs_result.accuracy_intensity:.3f}, "
@@ -560,11 +545,7 @@ def _train_one_experiment_inner(
             f"target accuracy direction={fs_result.accuracy_direction:.3f}, "
             f"target precision direction={fs_result.precision_direction:.3f}, "
             f"target recall direction={fs_result.recall_direction:.3f}, "
-            f"target f1 direction={fs_result.f1_direction:.3f}, "
-            f"target rapid intensification accuracy={fs_result.rapid_intensification_accuracy:.3f}, "
-            f"target rapid intensification precision={fs_result.rapid_intensification_precision:.3f}, "
-            f"target rapid intensification recall={fs_result.rapid_intensification_recall:.3f}, "
-            f"target rapid intensification f1={fs_result.rapid_intensification_f1:.3f}"
+            f"target f1 direction={fs_result.f1_direction:.3f}"
         )
 
     return result
@@ -752,18 +733,14 @@ def _print_summary_table(results, methods, splits):
     targets = [s["target"] for s in splits]
     
     metrics_to_print = [
-        ("Intensity Accuracy", "final source accuracy intensity", "final target accuracy intensity"),
-        ("Intensity Weighted F1", "final source f1 intensity", "final target f1 intensity"),
-        ("Intensity Precision", "final source precision intensity", "final target precision intensity"),
-        ("Intensity Recall", "final source recall intensity", "final target recall intensity"),
-        ("Rapid Intensification Accuracy", "final source rapid intensification accuracy", "final target rapid intensification accuracy"),
-        ("Rapid Intensification F1", "final source rapid intensification f1", "final target rapid intensification f1"),
-        ("Rapid Intensification Precision", "final source rapid intensification precision", "final target rapid intensification precision"),
-        ("Rapid Intensification Recall", "final source rapid intensification recall", "final target rapid intensification recall"),
-        ("Direction Accuracy", "final source accuracy direction", "final target accuracy direction"),
-        ("Direction Weighted F1", "final source f1 direction", "final target f1 direction"),
-        ("Direction Precision", "final source precision direction", "final target precision direction"),
-        ("Direction Recall", "final source recall direction", "final target recall direction")
+        ("Intensity Accuracy",     "final source accuracy intensity",  "final target accuracy intensity"),
+        ("Intensity Weighted F1",  "final source f1 intensity",        "final target f1 intensity"),
+        ("Intensity Precision",    "final source precision intensity",  "final target precision intensity"),
+        ("Intensity Recall",       "final source recall intensity",     "final target recall intensity"),
+        ("Direction Accuracy",     "final source accuracy direction",   "final target accuracy direction"),
+        ("Direction Weighted F1",  "final source f1 direction",         "final target f1 direction"),
+        ("Direction Precision",    "final source precision direction",  "final target precision direction"),
+        ("Direction Recall",       "final source recall direction",     "final target recall direction"),
     ]
     
     for metric_title, src_key, tgt_key in metrics_to_print:

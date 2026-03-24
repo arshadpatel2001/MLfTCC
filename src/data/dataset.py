@@ -353,7 +353,20 @@ class TCNDDataset(Dataset):
                         continue
                     if self.use_env and not env_path:
                         continue
-                        
+
+                    # Filter out samples with unknown future labels (-1 sentinel).
+                    # These have no valid label for intensity or direction and would
+                    # introduce noise if trained on. One .npy peek, two checks.
+                    if env_path is not None:
+                        try:
+                            _d = np.load(env_path, allow_pickle=True).item()
+                            _yi = int(np.asarray(_d.get("future_inte_change24", 0)).ravel()[0])
+                            _yd = int(np.asarray(_d.get("future_direction24",   0)).ravel()[0])
+                            if _yi < 0 or _yd < 0:
+                                continue
+                        except Exception:
+                            pass  # if unreadable, keep the sample and let __getitem__ handle it
+
                     self.index.append({
                         "basin":     basin,
                         "basin_idx": BASIN_TO_IDX[basin],
@@ -590,7 +603,7 @@ class TCNDDataset(Dataset):
         ]
         env_vec = torch.from_numpy(np.concatenate(parts).astype(np.float32))  # (94,)
 
-        # Labels (−1 sentinel → clamp to neutral class)
+        # Labels (−1 → clamp to neutral class)
         y_intensity = int(np.asarray(d.get("future_inte_change24", 2)).ravel()[0])
         y_direction = int(np.asarray(d.get("future_direction24",   0)).ravel()[0])
 
