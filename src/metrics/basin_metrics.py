@@ -350,6 +350,7 @@ class TransferEvaluator:
         target_basin: str,
         baseline_target_acc: float = 0.0,  # ERM result for BNTE
         device: str = "cuda",
+        disable_tqdm: bool = False,
     ) -> TransferResult:
         """
         Args:
@@ -373,7 +374,7 @@ class TransferEvaluator:
         for basin, loader in source_loaders.items():
             ev = BasinEvaluator(basin)
             with torch.no_grad():
-                for batch in tqdm(loader, desc=f"Evaluate Source {basin}", dynamic_ncols=True, leave=False):
+                for batch in tqdm(loader, desc=f"Evaluate Source {basin}", dynamic_ncols=True, leave=False, disable=disable_tqdm):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
@@ -401,7 +402,7 @@ class TransferEvaluator:
         # ── Target zero-shot performance ──────────────────────────────────────
         target_ev = BasinEvaluator(target_basin)
         with torch.no_grad():
-            for batch in tqdm(target_loader, desc=f"Evaluate Target {target_basin}", dynamic_ncols=True, leave=False):
+            for batch in tqdm(target_loader, desc=f"Evaluate Target {target_basin}", dynamic_ncols=True, leave=False, disable=disable_tqdm):
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
                 out = model(batch)

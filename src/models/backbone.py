@@ -7,7 +7,7 @@ Implements the three-branch multimodal encoder matching the TCNM architecture
 Architecture:
   Branch 1: 3D-CNN Encoder  ← Data_3d (13, 81, 81)
   Branch 2: MLP Encoder     ← Data_1d (4,)
-  Branch 3: Env-T-Net       ← Env-Data (77,)
+  Branch 3: Env-T-Net       ← Env-Data (94,)
   Fusion:   Feature concat + projection → representation z ∈ R^d
 
 For PhysIRM, the final representation is split into:
@@ -169,15 +169,27 @@ class TrackEncoder(nn.Module):
 
 class EnvEncoder(nn.Module):
     """
-    Encodes the 77-dimensional Env-Data vector.
+    Encodes the 94-dimensional Env-Data vector.
 
-    Actual TCND field layout (77 total):
+    Actual TCND field layout (94 total, confirmed by disk inspection):
       month(12) + area(6) + intensity_class(6) + wind(1) + move_velocity(1)
       + location_long(36) + location_lat(12)
-      + hist_dir12(1) + hist_dir24(1) + hist_inte24(1)
+      + hist_dir12(8) + hist_dir24(8) + hist_inte24(4)
+
+    Slice map:
+      [0:12]   month
+      [12:18]  area
+      [18:24]  intensity_class
+      [24:25]  wind
+      [25:26]  move_velocity
+      [26:62]  location_long
+      [62:74]  location_lat
+      [74:82]  history_direction12  (8-class one-hot)
+      [82:90]  history_direction24  (8-class one-hot)
+      [90:94]  history_inte_change24 (4-class one-hot)
     """
 
-    def __init__(self, in_dim: int = 77, embed_dim: int = 128, dropout: float = 0.1):
+    def __init__(self, in_dim: int = 94, embed_dim: int = 128, dropout: float = 0.1):
         super().__init__()
         self.month_emb    = nn.Linear(12, 32)
         self.area_emb     = nn.Linear(6,  16)
@@ -185,9 +197,9 @@ class EnvEncoder(nn.Module):
         self.scalar_emb   = nn.Linear(2,  16)   # wind + move_velocity
         self.loc_long_emb = nn.Linear(36, 32)
         self.loc_lat_emb  = nn.Linear(12, 16)
-        self.hist_emb     = nn.Linear(3,  16)   # dir12 + dir24 + inte24 scalars
+        self.hist_emb     = nn.Linear(20, 32)   # dir12(8)+dir24(8)+inte24(4) one-hots
 
-        fused_dim = 32 + 16 + 16 + 16 + 32 + 16 + 16  # 144
+        fused_dim = 32 + 16 + 16 + 16 + 32 + 16 + 32  # 160
 
         self.fuse = nn.Sequential(
             nn.LayerNorm(fused_dim),
@@ -199,14 +211,14 @@ class EnvEncoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, 77) → z: (B, embed_dim)"""
+        """x: (B, 94) → z: (B, embed_dim)"""
         month    = x[:,  0:12]
         area     = x[:, 12:18]
         icls     = x[:, 18:24]
-        scalars  = x[:, 24:26]
+        scalars  = x[:, 24:26]   # wind, move_velocity
         loc_long = x[:, 26:62]
         loc_lat  = x[:, 62:74]
-        hist     = x[:, 74:77]
+        hist     = x[:, 74:94]   # dir12(8) + dir24(8) + inte24(4)
 
         parts = [
             F.relu(self.month_emb(month)),
@@ -294,8 +306,8 @@ class LightweightTrackEncoder(nn.Module):
 
 
 class LightweightEnvEncoder(nn.Module):
-    """Encode Env-Data (77,) → (B, embed_dim)"""
-    def __init__(self, in_dim=77, embed_dim=64, dropout=0.1):
+    """Encode Env-Data (94,) → (B, embed_dim)"""
+    def __init__(self, in_dim=94, embed_dim=64, dropout=0.1):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, 128),

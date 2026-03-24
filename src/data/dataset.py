@@ -176,6 +176,7 @@ class TCNDDataset(Dataset):
         use_3d: bool = True,
         use_env: bool = True,
         cache: bool = False,
+        disable_tqdm: bool = False,
     ):
         self.root = Path(root)
         self.basins = basins
@@ -183,6 +184,7 @@ class TCNDDataset(Dataset):
         self.use_3d = use_3d
         self.use_env = use_env
         self.cache = cache
+        self.disable_tqdm = disable_tqdm
         self._cache_dict: Dict = {}
 
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
@@ -306,7 +308,7 @@ class TCNDDataset(Dataset):
             TCND_COLS = ["ID", "FLAG", "LAT_norm", "LONG_norm",
                          "WND_norm", "PRES_norm", "YYYYMMDDHH", "Name"]
 
-            for txt_file in tqdm(txt_files, desc=f"Loading index for {basin}/{split_folder}", dynamic_ncols=True, leave=False):
+            for txt_file in tqdm(txt_files, desc=f"Loading index for {basin}/{split_folder}", dynamic_ncols=True, leave=False, disable=self.disable_tqdm):
                 stem           = txt_file.stem          # e.g. WP2017BSTBANYAN
                 year, tc_name  = self._parse_filename(stem, basin)
 
@@ -406,16 +408,16 @@ class TCNDDataset(Dataset):
         if self.use_env:
             env_vec = env_vec_full
         else:
-            env_vec = torch.zeros(77, dtype=torch.float32)
+            env_vec = torch.zeros(94, dtype=torch.float32)
 
         # ── Physics features (for PhysIRM) ───────────────────────────────────
         phys = self._compute_physics_features(row, meta["basin"], data_3d)
 
         return {
-            "data_1d":       data_1d,                                    # (4,)
-            "data_3d":       data_3d,                                    # (13, 81, 81)
-            "env_data":      env_vec,                                    # (77,)
-            "phys_features": phys,                                       # (8,)
+            "data_1d":       data_1d.to(torch.float32),                  # (4,)
+            "data_3d":       data_3d.to(torch.float32),                  # (13, 81, 81)
+            "env_data":      env_vec.to(torch.float32),                  # (77,)
+            "phys_features": phys.to(torch.float32),                     # (8,)
             "basin_idx":     torch.tensor(meta["basin_idx"], dtype=torch.long),
             "y_intensity":   torch.tensor(y_intensity,       dtype=torch.long),
             "y_direction":   torch.tensor(y_direction,       dtype=torch.long),
@@ -488,8 +490,8 @@ class TCNDDataset(Dataset):
         # Calculate mean/std for each channel, ignoring NaNs
         # We use a masked array to simplify mean/std across channels
         masked_data = np.ma.masked_array(data_3d, mask=nan_mask)
-        mus = masked_data.mean(axis=(1, 2)).data     # (13,)
-        stds = masked_data.std(axis=(1, 2)).data   # (13,)
+        mus = masked_data.mean(axis=(1, 2), dtype=np.float32).data     # (13,)
+        stds = masked_data.std(axis=(1, 2), dtype=np.float32).data   # (13,)
         stds = np.maximum(stds, 1e-6)
         
         # Fill NaNs with channel means
@@ -499,32 +501,44 @@ class TCNDDataset(Dataset):
         # Standardize: (X - mu) / std
         data_3d = (data_3d - mus[:, None, None]) / stds[:, None, None]
 
-        return torch.from_numpy(data_3d)  # (13, H, W)
+        return torch.from_numpy(data_3d.astype(np.float32))  # (13, H, W)
 
     def _load_env(self, path: Path):
         """
         Load Env-Data .npy file.
         Returns (env_vec, y_intensity, y_direction).
 
-        Actual TCND .npy fields (confirmed from sample data):
-          month            (12,) one-hot
-          area              (6,) one-hot
-          intensity_class   (6,) one-hot
-          wind              scalar float
-          move_velocity     scalar int
-          location_long    (36,) one-hot
-          location_lat     (12,) one-hot
-          history_direction12   scalar int  (-1 = unknown, 0-7 = compass)
-          history_direction24   scalar int
-          history_inte_change24 scalar int  (-1 = unknown, 0-4 = class)
-          future_direction24    scalar int  ← label
-          future_inte_change24  scalar int  ← label
-        Total feature dim = 77
+        Actual TCND .npy fields (confirmed by disk inspection of real .npy files):
+          month                 (12,) one-hot
+          area                   (6,) one-hot
+          intensity_class        (6,) one-hot
+          wind              scalar float64  (already normalised 0-1)
+          move_velocity     scalar float64  (already normalised)
+          location_long         (36,) one-hot
+          location_lat          (12,) one-hot
+          history_direction12    (8,) one-hot   ← NOT a scalar
+          history_direction24    (8,) one-hot   ← NOT a scalar
+          history_inte_change24  (4,) one-hot   ← NOT a scalar
+          future_direction24   scalar int64  ← label  (−1 = unknown)
+          future_inte_change24 scalar int64  ← label  (−1 = unknown)
+
+        Assembled order (must match EnvEncoder slices in backbone.py):
+          [0:12]   month
+          [12:18]  area
+          [18:24]  intensity_class
+          [24:25]  wind
+          [25:26]  move_velocity
+          [26:62]  location_long
+          [62:74]  location_lat
+          [74:82]  history_direction12
+          [82:90]  history_direction24
+          [90:94]  history_inte_change24
+          Total = 94 dims
         """
         d = np.load(path, allow_pickle=True).item()
 
         def ohe(val, length):
-            """Get a one-hot/multi-hot array of fixed length."""
+            """Get a one-hot/multi-hot array of fixed length as float32."""
             if val is None:
                 return np.zeros(length, dtype=np.float32)
             arr = np.asarray(val, dtype=np.float32).ravel()
@@ -534,42 +548,31 @@ class TCNDDataset(Dataset):
                 arr = np.pad(arr, (0, length - arr.size))
             return arr[:length].astype(np.float32)
 
-        def scalar_norm(val, default=0.0, scale=1.0, sentinel_normed=None):
-            """Scalar → normalised length-1 float32 array.
-            -1 sentinel = unknown → sentinel_normed if provided, else default/scale."""
+        def scalar_f32(val, default=0.0):
+            """Scalar (or 0-d array) → float32 length-1 array."""
             if val is None:
-                return np.array([default / scale if sentinel_normed is None else sentinel_normed],
-                                dtype=np.float32)
-            v = float(np.asarray(val).ravel()[0])
-            if v < 0:  # -1 sentinel = unknown
-                if sentinel_normed is not None:
-                    return np.array([sentinel_normed], dtype=np.float32)
-                v = default
-            return np.array([v / scale], dtype=np.float32)
+                return np.array([default], dtype=np.float32)
+            v = np.asarray(val, dtype=np.float32).ravel()
+            return v[:1] if v.size >= 1 else np.array([default], dtype=np.float32)
 
         parts = [
-            ohe(d.get("month"),           12),   # 12
-            ohe(d.get("area"),             6),   #  6
-            ohe(d.get("intensity_class"),  6),   #  6
-            scalar_norm(d.get("wind"),          scale=1.0),   #  1  (already normalised 0-1)
-            scalar_norm(d.get("move_velocity"), scale=1.0),   #  1  (m/s, notebook uses raw)
-            ohe(d.get("location_long"),   36),   # 36
-            ohe(d.get("location_lat"),    12),   # 12
-            scalar_norm(d.get("history_direction12"), scale=1.0, sentinel_normed=0.0),  #  1  (0-7, -1→0.0)
-            scalar_norm(d.get("history_direction24"), scale=1.0, sentinel_normed=0.0),  #  1
-            scalar_norm(d.get("history_inte_change24"), scale=1.0, sentinel_normed=0.0),  # 1  (0-4, -1→0.0)
+            ohe(d.get("month"),              12),   # [0:12]
+            ohe(d.get("area"),                6),   # [12:18]
+            ohe(d.get("intensity_class"),     6),   # [18:24]
+            scalar_f32(d.get("wind")),               # [24:25]  already normalised
+            scalar_f32(d.get("move_velocity")),      # [25:26]  already normalised
+            ohe(d.get("location_long"),      36),   # [26:62]
+            ohe(d.get("location_lat"),       12),   # [62:74]
+            ohe(d.get("history_direction12"),  8),  # [74:82]  one-hot, not scalar
+            ohe(d.get("history_direction24"),  8),  # [82:90]  one-hot, not scalar
+            ohe(d.get("history_inte_change24"), 4), # [90:94]  one-hot, not scalar
         ]
-        env_vec = torch.from_numpy(np.concatenate(parts))  # (77,)
+        env_vec = torch.from_numpy(np.concatenate(parts).astype(np.float32))  # (94,)
 
-        assert env_vec.shape[0] == 77, (
-            f"env vector has length {env_vec.shape[0]}, expected 77. "
-            f"Check .npy file structure at {path}"
-        )
-
+        # Labels (−1 sentinel → clamp to neutral class)
         y_intensity = int(np.asarray(d.get("future_inte_change24", 2)).ravel()[0])
         y_direction = int(np.asarray(d.get("future_direction24",   0)).ravel()[0])
 
-        # Clamp -1 sentinel to valid class ranges
         if y_intensity < 0: y_intensity = 2   # steady state
         if y_direction < 0: y_direction = 0
         y_intensity = min(y_intensity, 4)
@@ -680,11 +683,13 @@ def make_dataloader(
     use_3d: bool = True,
     use_env: bool = True,
     seed: int = 42,
+    disable_tqdm: bool = False,
     **kwargs,
 ) -> DataLoader:
     ds = TCNDDataset(
         root=root, basins=basins, split=split,
-        use_3d=use_3d, use_env=use_env, seed=seed, **kwargs
+        use_3d=use_3d, use_env=use_env, seed=seed,
+        disable_tqdm=disable_tqdm, **kwargs
     )
     if len(ds) == 0:
         raise RuntimeError(
@@ -711,10 +716,11 @@ def make_per_basin_loaders(
     split: str,
     batch_size: int = 64,
     num_workers: int = 4,
+    disable_tqdm: bool = False,
     **kwargs,
 ) -> Dict[str, DataLoader]:
     """Return one DataLoader per basin (used for per-environment IRM updates)."""
     return {
-        b: make_dataloader(root, [b], split, batch_size, num_workers, **kwargs)
+        b: make_dataloader(root, [b], split, batch_size, num_workers, disable_tqdm=disable_tqdm, **kwargs)
         for b in basins
     }

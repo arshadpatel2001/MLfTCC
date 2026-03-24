@@ -192,11 +192,13 @@ def _train_one_experiment_inner(
         split="train", batch_size=bs,
         num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
+        disable_tqdm=args.no_tqdm,
     )
     val_loader_src = make_dataloader(
         root=args.data_root, basins=source_basins,
         split="val", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
+        disable_tqdm=args.no_tqdm,
     )
     # val_loader_tgt: used for training-time monitoring only (split="val").
     # test_loader_tgt: used ONLY for the final best-model evaluation (split="test").
@@ -205,11 +207,13 @@ def _train_one_experiment_inner(
         root=args.data_root, basins=[target_basin],
         split="val", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
+        disable_tqdm=args.no_tqdm,
     )
     test_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
         split="test", batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
+        disable_tqdm=args.no_tqdm,
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -281,7 +285,7 @@ def _train_one_experiment_inner(
         n_batches = max(1, max(len(l) for l in train_loaders_per_env.values()))
 
         pbar = tqdm(range(n_batches), desc=f"Epoch {epoch:3d}/{args.epochs}",
-                    unit="batch", leave=False, dynamic_ncols=True)
+                    unit="batch", leave=False, dynamic_ncols=True, disable=args.no_tqdm)
 
         for batch_idx in pbar:
             # Collect one batch from each environment
@@ -332,13 +336,13 @@ def _train_one_experiment_inner(
 
             val_start = time.time()
             with torch.no_grad():
-                for batch in tqdm(val_loader_src, desc="Validation Source", leave=False, dynamic_ncols=True):
+                for batch in tqdm(val_loader_src, desc="Validation Source", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
                     ev_src.update(batch, out)
 
-                for batch in tqdm(val_loader_tgt, desc="Validation Target", leave=False, dynamic_ncols=True):
+                for batch in tqdm(val_loader_tgt, desc="Validation Target", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
                     out = model(batch)
@@ -447,13 +451,13 @@ def _train_one_experiment_inner(
     ev_final = BasinEvaluator(target_basin)
     final_ev_start = time.time()
     with torch.no_grad():
-        for batch in tqdm(val_loader_src, desc="Final Source Evaluation", leave=False, dynamic_ncols=True):
+        for batch in tqdm(val_loader_src, desc="Final Source Evaluation", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
             ev_final_src.update(batch, out)
 
-        for batch in tqdm(test_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True):
+        for batch in tqdm(test_loader_tgt, desc="Final Evaluation", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
@@ -589,9 +593,9 @@ def few_shot_finetune(
         model.eval()
         model.heads.train()
         fs_start = time.time()
-        for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True):
+        for ep in tqdm(range(ft_epochs), desc="Few-shot Epochs", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             ep_start = time.time()
-            for batch in tqdm(shot_loader, desc=f"Epoch {ep+1}/{ft_epochs}", leave=False, dynamic_ncols=True):
+            for batch in tqdm(shot_loader, desc=f"Epoch {ep+1}/{ft_epochs}", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
                 ft_optimizer.zero_grad()
@@ -616,12 +620,13 @@ def few_shot_finetune(
         root=args.data_root, basins=[target_basin],
         split="test", batch_size=64, num_workers=0,
         use_3d=not args.no_3d, use_env=not args.no_env,
+        disable_tqdm=args.no_tqdm,
     )
     ev = BasinEvaluator(target_basin)
     model.eval()
     fs_eval_start = time.time()
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Few-shot Evaluation", leave=False, dynamic_ncols=True):
+        for batch in tqdm(test_loader, desc="Few-shot Evaluation", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
             out = model(batch)
@@ -658,8 +663,8 @@ def run_lobo_benchmark(args):
     all_results = []
 
     bench_start = time.time()
-    for split in tqdm(splits, desc="Leave-One-Basin-Out Splits", dynamic_ncols=True):
-        for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True):
+    for split in tqdm(splits, desc="Leave-One-Basin-Out Splits", dynamic_ncols=True, disable=args.no_tqdm):
+        for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             exp_start = time.time()
             run_id = f"{method_name}_{split['target']}"
             try:
@@ -752,17 +757,17 @@ def run_incremental_benchmark(args):
     all_results = []
     
     bench_start = time.time()
-    for target in tqdm(targets, desc="Incremental Targets", dynamic_ncols=True):
+    for target in tqdm(targets, desc="Incremental Targets", dynamic_ncols=True, disable=args.no_tqdm):
         if args.source_basins:
             available_sources = [s.strip() for s in args.source_basins.split(",")]
         else:
             available_sources = [b for b in BASIN_CODES if b != target]
             
         # Iteration sequence: 1 source, 2 sources, ..., N sources
-        for i in tqdm(range(1, len(available_sources) + 1), desc="Incremental Sources", leave=False, dynamic_ncols=True):
+        for i in tqdm(range(1, len(available_sources) + 1), desc="Incremental Sources", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             source_basins = available_sources[:i]
             
-            for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True):
+            for method_name in tqdm(methods, desc="Methods", leave=False, dynamic_ncols=True, disable=args.no_tqdm):
                 exp_start = time.time()
                 run_id = f"{method_name}_{target}_src{i}"
                 try:
@@ -880,6 +885,8 @@ def parse_args():
                    help="Ablation: disable Data_3d (spatial) branch")
     p.add_argument("--no_env", action="store_true",
                    help="Ablation: disable Env-Data branch")
+    p.add_argument("--no_tqdm", action="store_true",
+                   help="Hide TQDM progress bars and only print essential logs")
 
     # Few-shot
     p.add_argument("--few_shot",      action="store_true",
