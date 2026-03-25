@@ -271,7 +271,7 @@ def _train_one_experiment_inner(
         f"Train: {total_train:,}  Val-src: {len(val_loader_src.dataset):,}  "
         f"Val-tgt: {len(val_loader_tgt.dataset):,}  Test-tgt: {len(test_loader_tgt.dataset):,}"
     )
-
+    log.info(f"Training Started at {time.time()}")
     for epoch in range(1, args.epochs + 1):
         model.train()
         if isinstance(method, torch.nn.Module):

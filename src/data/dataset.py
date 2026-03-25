@@ -434,15 +434,17 @@ class TCNDDataset(Dataset):
 
         data_3d = np.stack(chs, axis=0)   # (13, H, W)
 
-        # Per-channel z-score using boolean masking (avoids masked_array overhead).
-        # Fill NaN/land pixels with the channel mean before normalising.
-        for c in range(13):
-            finite = np.isfinite(data_3d[c])
-            mu     = float(data_3d[c][finite].mean()) if finite.any() else 0.0
-            std    = float(data_3d[c][finite].std()) if finite.any() else 1.0
-            std    = max(std, 1e-6)
-            data_3d[c][~finite] = mu
-            data_3d[c] = (data_3d[c] - mu) / std
+        # Vectorized per-channel z-score — all 13 channels in 5 NumPy ops.
+        # Uses np.where (no fancy indexing, no Python loop, no masked_array).
+        finite    = np.isfinite(data_3d)                          # (13, H, W)
+        n         = finite.sum(axis=(1, 2), keepdims=True).clip(min=1)  # (13,1,1)
+        safe      = np.where(finite, data_3d, 0.0)
+        mus       = safe.sum(axis=(1, 2), keepdims=True) / n      # (13,1,1)
+        stds      = np.sqrt(
+            np.where(finite, (data_3d - mus) ** 2, 0.0)
+            .sum(axis=(1, 2), keepdims=True) / n
+        ).clip(min=1e-6)                                          # (13,1,1)
+        data_3d   = np.where(finite, (data_3d - mus) / stds, 0.0)
 
         return torch.from_numpy(data_3d.astype(np.float32))
 
