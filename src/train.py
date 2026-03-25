@@ -726,10 +726,13 @@ def run_lobo_benchmark(args):
                 all_results.append(result)
                 log.info(
                     f"✓ {run_id}: "
-                    f"acc_int={result['final target accuracy intensity']:.3f} "
-                    f"ri_f1={result['final target rapid intensification f1']:.3f} "
-                    f"mae_wnd={result['final target mae wind ms']:.2f}m/s "
-                    f"[{time.time()-t_exp:.1f}s]"
+                    f"final target accuracy intensity={result['final target accuracy intensity']:.3f} "
+                    f"| final target f1 intensity={result['final target f1 intensity']:.3f} "
+                    f"| final target accuracy direction={result['final target accuracy direction']:.3f} "
+                    f"| final target f1 direction={result['final target f1 direction']:.3f} "
+                    f"| final target mae wind ms={result['final target mae wind ms']:.2f} "
+                    f"| final target mae pres hpa={result['final target mae pres hpa']:.2f} "
+                    f"[Took {time.time()-t_exp:.2f}s]"
                 )
             except Exception as e:
                 log.error(f"✗ {run_id} FAILED: {e}")
@@ -790,10 +793,13 @@ def run_incremental_benchmark(args):
                     all_results.append(result)
                     log.info(
                         f"✓ {run_id}: "
-                        f"acc_int={result['final target accuracy intensity']:.3f} "
-                        f"ri_f1={result['final target rapid intensification f1']:.3f} "
-                        f"mae_wnd={result['final target mae wind ms']:.2f}m/s "
-                        f"[{time.time()-t_exp:.1f}s]"
+                        f"final target accuracy intensity={result['final target accuracy intensity']:.3f} "
+                        f"| final target f1 intensity={result['final target f1 intensity']:.3f} "
+                        f"| final target accuracy direction={result['final target accuracy direction']:.3f} "
+                        f"| final target f1 direction={result['final target f1 direction']:.3f} "
+                        f"| final target mae wind ms={result['final target mae wind ms']:.2f} "
+                        f"| final target mae pres hpa={result['final target mae pres hpa']:.2f} "
+                        f"[Took {time.time()-t_exp:.2f}s]"
                     )
                 except Exception as e:
                     log.error(f"✗ {run_id} FAILED: {e}")
@@ -819,7 +825,6 @@ def _print_summary_table(results, methods, splits):
     metrics_to_print = [
         ("Intensity Accuracy",    "final source accuracy intensity",   "final target accuracy intensity"),
         ("Intensity Weighted F1", "final source f1 intensity",          "final target f1 intensity"),
-        ("RI F1 (safety)",        "final source rapid intensification f1", "final target rapid intensification f1"),
         ("MAE Wind (m/s)",        "final source mae wind ms",           "final target mae wind ms"),
         ("MAE Pres (hPa)",        "final source mae pres hpa",          "final target mae pres hpa"),
         ("Direction Accuracy",    "final source accuracy direction",    "final target accuracy direction"),
@@ -1000,9 +1005,10 @@ if __name__ == "__main__":
             )
             log.info(
                 f"Final [{method_name}→{args.target_basin}]: "
-                f"acc_int={result['final target accuracy intensity']:.3f} "
-                f"f1_int={result['final target f1 intensity']:.3f} "
-                f"ri_f1={result['final target rapid intensification f1']:.3f} "
-                f"mae_wnd={result['final target mae wind ms']:.2f}m/s "
-                f"mae_prs={result['final target mae pres hpa']:.2f}hPa"
+                f"final target accuracy intensity={result['final target accuracy intensity']:.3f} "
+                f"| final target f1 intensity={result['final target f1 intensity']:.3f} "
+                f"| final target accuracy direction={result['final target accuracy direction']:.3f} "
+                f"| final target f1 direction={result['final target f1 direction']:.3f} "
+                f"| final target mae wind ms={result['final target mae wind ms']:.2f} "
+                f"| final target mae pres hpa={result['final target mae pres hpa']:.2f}"
             )

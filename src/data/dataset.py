@@ -629,7 +629,10 @@ def make_dataloader(
     cache: bool = False,
     **kwargs,
 ) -> DataLoader:
-    if cache:
+    # Disable multiprocessing only for train when caching — forked workers
+    # would each get an isolated copy of GLOBAL_CACHE (defeating the purpose).
+    # Val/test loaders are NOT cached and keep their workers for fast streaming.
+    if cache and split == "train":
         num_workers = 0
     ds = TCNDDataset(
         root=root, basins=basins, split=split,
