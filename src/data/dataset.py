@@ -57,7 +57,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import time
 try:
@@ -258,11 +258,34 @@ class TCNDDataset(Dataset):
                     env_path     = self._get_env_path(basin, year, tc_name, ts)
 
                     if self.use_3d  and data_3d_path is None: continue
-                    if self.use_env and env_path     is None: continue
+                    # The .npy is always required: labels (y_intensity, y_direction)
+                    # come from it regardless of use_env.
+                    if env_path is None: continue
 
-                    # Note: -1 label filtering is done lazily in the collate_fn
-                    # (tcnd_collate_fn) so we avoid O(N) .npy reads here.
-                    # This makes indexing ~10-100× faster on Google Drive.
+                    # ── Filter invalid labels at index time ───────────────────
+                    # Read the .npy NOW and skip samples with -1 labels (unknown
+                    # future).  This keeps invalid samples OUT of the index
+                    # entirely, so __getitem__ never loads their .nc/.npy files
+                    # and tcnd_collate_fn never has to filter them at batch time.
+                    #
+                    # The old "lazy filtering via collate_fn" approach was slower:
+                    # it caused ~15-20% of __getitem__ calls to load .nc + .npy
+                    # files from disk, compute physics features, and cache the
+                    # result — only for the sample to be silently dropped by the
+                    # collate_fn.  That wasted I/O dominates epoch-1 time and,
+                    # without --cache_data, wastes I/O on EVERY epoch.
+                    #
+                    # GLOBAL_INDEX_CACHE means this .npy peek happens exactly
+                    # once per (root, basin, split) combination per Python session,
+                    # so the cost is negligible.
+                    try:
+                        _d  = np.load(env_path, allow_pickle=True).item()
+                        _yi = int(np.asarray(_d.get("future_inte_change24", 0)).ravel()[0])
+                        _yd = int(np.asarray(_d.get("future_direction24",   0)).ravel()[0])
+                        if _yi < 0 or _yd < 0:
+                            continue   # skip — no valid label for this timestep
+                    except Exception:
+                        pass   # unreadable .npy → keep sample, let __getitem__ handle
 
                     # 24 h-ahead regression targets (row i+4 = 4 × 6 h).
                     # TCND guarantees uniform 6-h intervals, so row i+4 is always
@@ -374,12 +397,6 @@ class TCNDDataset(Dataset):
         y_wind_reg = torch.tensor(float(meta.get("future_wnd_norm",  float("nan"))), dtype=torch.float32)
         y_pres_reg = torch.tensor(float(meta.get("future_pres_norm", float("nan"))), dtype=torch.float32)
 
-        # -1 means the label is unknown for this timestep (end-of-storm or
-        # unclassified). Mark invalid so tcnd_collate_fn can drop these samples
-        # from the batch without breaking training. This avoids the O(N) .npy
-        # pre-scan during indexing.
-        valid = int(y_intensity >= 0 and y_direction >= 0)
-
         return {
             "data_1d":       data_1d,
             "data_3d":       data_3d.to(torch.float32),
@@ -390,7 +407,6 @@ class TCNDDataset(Dataset):
             "y_direction":   torch.tensor(y_direction,       dtype=torch.long),
             "y_wind_reg":    y_wind_reg,
             "y_pres_reg":    y_pres_reg,
-            "valid":         torch.tensor(valid,             dtype=torch.bool),
         }
 
     # ── Modality loaders ──────────────────────────────────────────────────────
@@ -581,20 +597,22 @@ class TCNDDataset(Dataset):
 
 def tcnd_collate_fn(samples):
     """
-    Custom collate that silently drops samples with unknown labels (valid=False).
+    Safety-net collate: drops any sample whose y_intensity or y_direction label
+    is negative (unknown).  In normal operation the index build already filtered
+    these out, so this guard fires only if a .npy was unreadable during indexing.
 
-    This replaces the previous O(N) .npy pre-scan in _build_index:
-    the .npy is already loaded in __getitem__ via _load_env, so filtering
-    here costs nothing extra. The batch is assembled from valid samples only.
-    If all samples in a batch are invalid (very rare), returns None and the
-    training loop skips that batch.
+    NOTE: We no longer carry a 'valid' sentinel key in each sample dict.  That
+    design mutated GLOBAL_CACHE entries in-place (popping the key on first use)
+    and forced a torch.tensor(True) allocation on every subsequent batch access.
+    Instead we just check the label tensors directly — O(batch_size) scalars,
+    zero allocations, no cache mutation.
     """
-    valid = [s for s in samples if s.get("valid", torch.tensor(True)).item()]
+    valid = [
+        s for s in samples
+        if s["y_intensity"].item() >= 0 and s["y_direction"].item() >= 0
+    ]
     if not valid:
-        return None  # caller must handle: `if batch is None: continue`
-    # Strip the sentinel before collating so downstream code is unaffected.
-    for s in valid:
-        s.pop("valid", None)
+        return None   # caller checks `if batch is None: continue`
     return default_collate(valid)
 
 
@@ -626,13 +644,17 @@ def make_dataloader(
     shuffle   = (split == "train")
     drop_last = (split == "train") and (len(ds) > batch_size)
     safe_bs   = min(batch_size, len(ds))
+    cuda_avail = torch.cuda.is_available()
+    pin_kwargs: Dict[str, Any] = {"pin_memory": cuda_avail}
+    if cuda_avail:
+        pin_kwargs["pin_memory_device"] = "cuda"
     return DataLoader(
         ds, batch_size=safe_bs, shuffle=shuffle,
         num_workers=num_workers, drop_last=drop_last,
         collate_fn=tcnd_collate_fn,
-        pin_memory=torch.cuda.is_available(),
         persistent_workers=(num_workers > 0),
         prefetch_factor=4 if num_workers > 0 else None,
+        **pin_kwargs,
     )
 
 
