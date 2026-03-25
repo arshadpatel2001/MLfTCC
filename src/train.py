@@ -694,7 +694,7 @@ def run_lobo_benchmark(args):
                 all_results.append(result)
                 log.info(
                     f"✓ {run_id}: final target accuracy intensity={result['final target accuracy intensity']:.3f} "
-                    f"final target rapid intensification f1={result['final target rapid intensification f1']:.3f} "
+                    f"final target f1 intensity={result['final target f1 intensity']:.3f} "
                     f"[Took {time.time() - exp_start:.2f}s]"
                 )
             except Exception as e:
@@ -834,7 +834,7 @@ def run_incremental_benchmark(args):
                     all_results.append(result)
                     log.info(
                         f"✓ {run_id}: final target accuracy intensity={result['final target accuracy intensity']:.3f} "
-                        f"final target rapid intensification f1={result['final target rapid intensification f1']:.3f} "
+                        f"final target f1 intensity={result['final target f1 intensity']:.3f} "
                         f"[Took {time.time() - exp_start:.2f}s]"
                     )
                 except Exception as e:
@@ -1020,5 +1020,5 @@ if __name__ == "__main__":
             )
             log.info(
                 f"Final: final target accuracy intensity={result['final target accuracy intensity']:.3f} "
-                f"final target rapid intensification f1={result['final target rapid intensification f1']:.3f}"
+                f"final target f1 intensity={result['final target f1 intensity']:.3f}"
             )

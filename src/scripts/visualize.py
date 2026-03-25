@@ -144,10 +144,10 @@ def plot_ri_comparison(
         m = r.get("method")
         b = r.get("target_basin")
         if m in data and b in data[m]:
-            data[m][b] = r.get("final target rapid intensification f1", 0.0)
+            data[m][b] = r.get("final target f1 intensity", 0.0)
 
     if not HAS_MPL:
-        print("\nRapid Intensification F1 per target basin:")
+        print("\nIntensity F1 per target basin:")
         for m in methods:
             row = "  ".join(f"{b}:{data[m][b]:.3f}" for b in basins)
             print(f"  {METHOD_LABELS[m]:20s}: {row}")
@@ -172,8 +172,8 @@ def plot_ri_comparison(
 
     ax.set_xticks(x)
     ax.set_xticklabels([BASIN_DISPLAY[b] for b in basins], fontsize=11)
-    ax.set_ylabel("Rapid Intensification F1 Score", fontsize=12)
-    ax.set_title("Rapid Intensification F1 — Zero-Shot Cross-Basin Transfer", fontsize=13)
+    ax.set_ylabel("Intensity F1 Score", fontsize=12)
+    ax.set_title("Intensity F1 — Zero-Shot Cross-Basin Transfer", fontsize=13)
     ax.legend(loc="upper right", fontsize=9, ncol=2)
     ax.set_ylim(0, 0.8)
     ax.grid(axis="y", alpha=0.3, zorder=0)
