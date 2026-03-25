@@ -381,9 +381,6 @@ def _train_one_experiment_inner(
                 f"| source precision direction={r_src.precision_direction:.3f} "
                 f"| source recall direction={r_src.recall_direction:.3f} "
                 f"| source f1 direction={r_src.f1_direction:.3f} "
-                f"| source rapid intensification recall={r_src.rapid_intensification_recall:.3f} "
-                f"| source rapid intensification precision={r_src.rapid_intensification_precision:.3f} "
-                f"| source rapid intensification f1={r_src.rapid_intensification_f1:.3f} "
                 f"| target accuracy intensity={r_tgt.accuracy_intensity:.3f} "
                 f"| target precision intensity={r_tgt.precision_intensity:.3f} "
                 f"| target recall intensity={r_tgt.recall_intensity:.3f} "
@@ -392,9 +389,6 @@ def _train_one_experiment_inner(
                 f"| target precision direction={r_tgt.precision_direction:.3f} "
                 f"| target recall direction={r_tgt.recall_direction:.3f} "
                 f"| target f1 direction={r_tgt.f1_direction:.3f} "
-                f"| target rapid intensification recall={r_tgt.rapid_intensification_recall:.3f} "
-                f"| target rapid intensification precision={r_tgt.rapid_intensification_precision:.3f} "
-                f"| target rapid intensification f1={r_tgt.rapid_intensification_f1:.3f} "
                 f"| loss={epoch_metrics.get('loss', float('nan')):.4f}"
             )
 
@@ -422,9 +416,6 @@ def _train_one_experiment_inner(
                 "source precision direction": r_src.precision_direction,
                 "source recall direction": r_src.recall_direction,
                 "source f1 direction": r_src.f1_direction,
-                "source rapid intensification recall": r_src.rapid_intensification_recall,
-                "source rapid intensification precision": r_src.rapid_intensification_precision,
-                "source rapid intensification f1": r_src.rapid_intensification_f1,
                 "target accuracy intensity": r_tgt.accuracy_intensity,
                 "target precision intensity": r_tgt.precision_intensity,
                 "target recall intensity": r_tgt.recall_intensity,
@@ -433,9 +424,6 @@ def _train_one_experiment_inner(
                 "target precision direction": r_tgt.precision_direction,
                 "target recall direction": r_tgt.recall_direction,
                 "target f1 direction": r_tgt.f1_direction,
-                "target rapid intensification recall": r_tgt.rapid_intensification_recall,
-                "target rapid intensification precision": r_tgt.rapid_intensification_precision,
-                "target rapid intensification f1": r_tgt.rapid_intensification_f1,
                 **epoch_metrics,
             })
 

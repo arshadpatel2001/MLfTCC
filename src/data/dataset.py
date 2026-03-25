@@ -721,9 +721,10 @@ def make_dataloader(
     cache: bool = False,
     **kwargs,
 ) -> DataLoader:
-    # If caching, we MUST disable multiprocessing to allow the main thread 
-    # to maintain a single memory space. Otherwise, 8 workers = 8 isolated caches.
-    if cache:
+    # When caching train data: disable multiprocessing so all workers share the
+    # same GLOBAL_CACHE dict (forked workers get isolated copies).
+    # Val/test loaders are NOT cached so they keep their workers for fast streaming.
+    if cache and split == "train":
         num_workers = 0
         
     ds = TCNDDataset(
