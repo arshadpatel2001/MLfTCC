@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import grad
-
+from torch.func import functional_call
 
 # ── Loss utilities ────────────────────────────────────────────────────────────
 
@@ -360,7 +360,7 @@ class GradientReversal(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, alpha):
         ctx.alpha = alpha
-        return x.view_as(x)
+        return x.reshape(x.shape)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -515,19 +515,26 @@ class MAML(DGMethod):
         # FOMAML: compute gradients, create adapted params manually
         fast_weights = {n: p.clone() for n, p in model.named_parameters()}
         fast_buffers = {n: b.clone() for n, b in model.named_buffers()}
+        
+        device = next(model.parameters()).device
+        device_type = "cuda" if device.type == "cuda" else "cpu"
+        use_amp = device.type == "cuda"
 
         for _ in range(self.inner_steps):
             params_and_buffers = {**fast_weights, **fast_buffers}
             # Forward with fast weights and buffers
-            out  = self._forward_with_weights(model, support_batch, params_and_buffers)
-            loss = task_loss(
-                out["logits_intensity"], out["logits_direction"],
-                support_batch["y_intensity"], support_batch["y_direction"],
-                pred_reg   = out.get("pred_intensity_reg"),
-                y_wind_reg = support_batch.get("y_wind_reg"),
-                y_pres_reg = support_batch.get("y_pres_reg"),
-                reg_weight = self.reg_weight,
-            )
+            with torch.autocast(device_type=device_type, enabled=use_amp):
+                out  = self._forward_with_weights(model, support_batch, params_and_buffers)
+                loss = task_loss(
+                    out["logits_intensity"], out["logits_direction"],
+                    support_batch["y_intensity"], support_batch["y_direction"],
+                    pred_reg   = out.get("pred_intensity_reg"),
+                    y_wind_reg = support_batch.get("y_wind_reg"),
+                    y_pres_reg = support_batch.get("y_pres_reg"),
+                    reg_weight = self.reg_weight,
+                )
+            
+            # `scaler` not used here because inner gradients are for weights, not standard optimizer
             grads = torch.autograd.grad(loss, fast_weights.values(),
                                         create_graph=not self.first_order,
                                         allow_unused=True)
@@ -541,12 +548,23 @@ class MAML(DGMethod):
     def _forward_with_weights(self, model: nn.Module, batch: dict, weights: dict) -> dict:
         """
         Forward pass using custom weight dict instead of model.parameters().
-        This is a simplified functional forward — for production use `higher` or
-        `torch.func.functional_call`.
+        Uses torch.func.functional_call (PyTorch ≥ 2.0).
+
+        Weight tensors are made contiguous before the call.  MAML clones all
+        model parameters in _inner_loop via p.clone(), which preserves any
+        non-standard memory format (e.g. channels_last set for A100 throughput).
+        Passing channels_last weights to functional_call on MPS triggers an
+        internal .view() in the MPS kernel that raises:
+          "view size is not compatible with input tensor's size and stride"
+        Calling .contiguous() strips the channels_last flag and gives standard
+        NCHW layout that every backend handles.  The cost is negligible: MAML
+        already copies all parameters every inner step.
         """
-        # Use torch.func.functional_call (PyTorch ≥ 2.0)
-        from torch.func import functional_call
-        return functional_call(model, weights, (batch,))
+        contiguous_weights = {
+            k: v.contiguous() if isinstance(v, torch.Tensor) else v
+            for k, v in weights.items()
+        }
+        return functional_call(model, contiguous_weights, (batch,))
 
     def compute_loss(self, batches: Dict[str, dict], model: nn.Module):
         """
@@ -555,6 +573,10 @@ class MAML(DGMethod):
           - Inner-loop adapt on support
           - Compute query loss with adapted weights
         """
+        device = next(model.parameters()).device
+        device_type = "cuda" if device.type == "cuda" else "cpu"
+        use_amp = device.type == "cuda"
+        
         meta_losses = []
         for basin, batch in batches.items():
             n  = batch["data_1d"].shape[0]
@@ -564,7 +586,7 @@ class MAML(DGMethod):
 
             # Shuffle within the batch so support/query are not temporally biased
             perm = torch.randperm(n, device=batch["data_1d"].device)
-            batch_s = {k: (v[perm] if isinstance(v, torch.Tensor) else v)
+            batch_s = {k: (v[perm].contiguous() if isinstance(v, torch.Tensor) else v)
                        for k, v in batch.items()}
 
             support = {k: (v[:n_s] if isinstance(v, torch.Tensor) else v)
@@ -574,15 +596,16 @@ class MAML(DGMethod):
 
             fast_w = self._inner_loop(model, support)
             # Query loss with adapted weights
-            out_q  = self._forward_with_weights(model, query, fast_w)
-            loss_q = task_loss(
-                out_q["logits_intensity"], out_q["logits_direction"],
-                query["y_intensity"], query["y_direction"],
-                pred_reg   = out_q.get("pred_intensity_reg"),
-                y_wind_reg = query.get("y_wind_reg"),
-                y_pres_reg = query.get("y_pres_reg"),
-                reg_weight = self.reg_weight,
-            )
+            with torch.autocast(device_type=device_type, enabled=use_amp):
+                out_q  = self._forward_with_weights(model, query, fast_w)
+                loss_q = task_loss(
+                    out_q["logits_intensity"], out_q["logits_direction"],
+                    query["y_intensity"], query["y_direction"],
+                    pred_reg   = out_q.get("pred_intensity_reg"),
+                    y_wind_reg = query.get("y_wind_reg"),
+                    y_pres_reg = query.get("y_pres_reg"),
+                    reg_weight = self.reg_weight,
+                )
             meta_losses.append(loss_q)
 
         if not meta_losses:

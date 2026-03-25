@@ -71,8 +71,8 @@ class SqueezeExcite(nn.Module):
 
     def forward(self, x):
         b, c, _, _ = x.shape
-        w = self.pool(x).view(b, c)
-        w = self.fc(w).view(b, c, 1, 1)
+        w = self.pool(x).reshape(b, c)
+        w = self.fc(w).reshape(b, c, 1, 1)
         return x * w
 
 
@@ -135,14 +135,16 @@ class SpatialEncoder(nn.Module):
             z: (B, embed_dim) spatial feature vector
         """
         # Channels-last (NHWC) format gives 2× conv2d throughput on A100 Ampere.
-        x = x.to(memory_format=torch.channels_last)
+        if torch.cuda.is_available():
+            x = x.to(memory_format=torch.channels_last)
         h = self.stem(x)
         h = self.layer1(h)
         h = self.layer2(h)
         h = self.layer3(h)
         # Concatenate global average and max pool for richer representation
-        feat = torch.cat([self.gap(h).squeeze(-1).squeeze(-1),
-                          self.gmp(h).squeeze(-1).squeeze(-1)], dim=-1)  # (B, 1024)
+        gap_feat = self.gap(h).reshape(h.size(0), -1)
+        gmp_feat = self.gmp(h).reshape(h.size(0), -1)
+        feat = torch.cat([gap_feat, gmp_feat], dim=-1)  # (B, 1024)
         return self.level_attn(feat)  # (B, embed_dim)
 
 
@@ -289,14 +291,18 @@ class LightweightSpatialEncoder(nn.Module):
             ConvBnRelu(64, 128, k=3, s=2, p=1),
             ConvBnRelu(128, 256, k=3, s=2, p=1),
             nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
         )
         self.proj = nn.Sequential(
             nn.Linear(256, embed_dim),
             nn.LayerNorm(embed_dim)
         )
 
-    def forward(self, x): return self.proj(self.net(x))
+    def forward(self, x):
+        if torch.cuda.is_available():
+            x = x.to(memory_format=torch.channels_last)
+        h = self.net(x)
+        h = h.reshape(h.size(0), -1)
+        return self.proj(h)
 
 
 class LightweightTrackEncoder(nn.Module):
@@ -573,8 +579,9 @@ class TropiCycloneModel(nn.Module):
         heads = TaskHeads(in_dim=final_dim, dropout=dropout)
         model = cls(backbone, heads)
         # Convert conv layers to NHWC channels-last layout for A100 throughput.
-        # Non-conv modules (Linear, LayerNorm) are unaffected.
-        if backbone.spatial_enc is not None:
+        # This is restricted to CUDA because non-contiguous stride can cause .view()
+        # issues on other backends (like MPS).
+        if backbone.spatial_enc is not None and torch.cuda.is_available():
             backbone.spatial_enc = backbone.spatial_enc.to(
                 memory_format=torch.channels_last
             )
