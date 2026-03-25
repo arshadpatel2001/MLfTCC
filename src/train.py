@@ -44,6 +44,12 @@ import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 
+def _make_scaler(init_scale: int = 2**14):
+    """Version-safe GradScaler: torch.amp (≥2.1) or torch.cuda.amp (2.0.x)."""
+    if hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", init_scale=init_scale)
+    return torch.cuda.amp.GradScaler(init_scale=init_scale)  # PyTorch 2.0.x
+
 # ── Project imports ───────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -250,8 +256,7 @@ def _train_one_experiment_inner(
     else:
         scheduler  = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     # A100 rarely overflows at fp16; smaller init_scale reduces noisy scale oscil.
-    scaler     = (torch.amp.GradScaler("cuda", init_scale=2**14)
-                  if device.type == "cuda" else None)
+    scaler     = _make_scaler(init_scale=2**14) if device.type == "cuda" else None
 
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_f1 = -1.0
@@ -336,6 +341,7 @@ def _train_one_experiment_inner(
             with torch.no_grad():
                 for batch in tqdm(val_loader_src, desc="Val-src",
                                   leave=False, dynamic_ncols=True, disable=args.no_tqdm):
+                    if batch is None: continue
                     batch = {k: v.to(device, non_blocking=True)
                              if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
@@ -348,6 +354,7 @@ def _train_one_experiment_inner(
 
                 for batch in tqdm(val_loader_tgt, desc="Val-tgt",
                                   leave=False, dynamic_ncols=True, disable=args.no_tqdm):
+                    if batch is None: continue
                     batch = {k: v.to(device, non_blocking=True)
                              if isinstance(v, torch.Tensor) else v
                              for k, v in batch.items()}
@@ -453,6 +460,7 @@ def _train_one_experiment_inner(
     with torch.no_grad():
         for batch in tqdm(val_loader_src, desc="Final-src",
                           leave=False, dynamic_ncols=True, disable=args.no_tqdm):
+            if batch is None: continue
             batch = {k: v.to(device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             with torch.autocast(
@@ -464,6 +472,7 @@ def _train_one_experiment_inner(
 
         for batch in tqdm(test_loader_tgt, desc="Final-tgt",
                           leave=False, dynamic_ncols=True, disable=args.no_tqdm):
+            if batch is None: continue
             batch = {k: v.to(device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             with torch.autocast(
@@ -605,8 +614,7 @@ def few_shot_finetune(
                        and "fused" in optim.Adam.__init__.__code__.co_varnames
                        else {})
         ft_optimizer = optim.Adam(model.heads.parameters(), lr=ft_lr, **fused_kw)
-        ft_scaler    = (torch.amp.GradScaler("cuda")
-                        if device.type == "cuda" else None)
+        ft_scaler    = _make_scaler() if device.type == "cuda" else None
 
         model.eval()
         model.heads.train()
@@ -615,6 +623,7 @@ def few_shot_finetune(
         for ep in tqdm(range(ft_epochs), desc="Few-shot epochs",
                        leave=False, dynamic_ncols=True, disable=args.no_tqdm):
             for batch in shot_loader:
+                if batch is None: continue
                 batch = {k: v.to(device, non_blocking=True)
                          if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
@@ -659,6 +668,7 @@ def few_shot_finetune(
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Few-shot eval",
                           leave=False, dynamic_ncols=True, disable=args.no_tqdm):
+            if batch is None: continue
             batch = {k: v.to(device, non_blocking=True)
                      if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}

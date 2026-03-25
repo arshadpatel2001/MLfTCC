@@ -57,7 +57,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import time
 try:
@@ -357,7 +357,14 @@ class TCNDDataset(Dataset):
         )
 
         # Env-Data
-        env_vec_full, y_intensity, y_direction = self._load_env(meta["env_path"])
+        env_path = meta["env_path"]
+        if env_path is not None:
+            env_vec_full, y_intensity, y_direction = self._load_env(env_path)
+        else:
+            # --no_env mode or missing .npy: zero env vector, labels unknown.
+            env_vec_full = torch.zeros(94, dtype=torch.float32)
+            y_intensity  = 0
+            y_direction  = 0
         env_vec = env_vec_full if self.use_env else torch.zeros(94, dtype=torch.float32)
 
         # Physics features
@@ -617,19 +624,13 @@ def make_dataloader(
     shuffle   = (split == "train")
     drop_last = (split == "train") and (len(ds) > batch_size)
     safe_bs   = min(batch_size, len(ds))
-    # pin_memory_device pins directly to the active CUDA device, reducing
-    # host→device transfer latency vs. the generic pin_memory=True path.
-    cuda_avail = torch.cuda.is_available()
-    pin_kwargs: Dict[str, Any] = {"pin_memory": True}
-    if cuda_avail:
-        pin_kwargs["pin_memory_device"] = "cuda"
     return DataLoader(
         ds, batch_size=safe_bs, shuffle=shuffle,
         num_workers=num_workers, drop_last=drop_last,
         collate_fn=tcnd_collate_fn,
+        pin_memory=torch.cuda.is_available(),
         persistent_workers=(num_workers > 0),
         prefetch_factor=4 if num_workers > 0 else None,
-        **pin_kwargs,
     )
 
 
