@@ -33,13 +33,6 @@ Key data-format facts (verified against real TCND sample files):
     future_direction24  scalar int64    LABEL 0–7  or -1 (unknown)
     future_inte_change24 scalar int64   LABEL 0–3  or -1 (unknown)
 
-    CRITICAL BUG FIX: history_direction* and history_inte_change24 are stored
-    as raw integer class indices, NOT as one-hot arrays.  They must be converted
-    with class_to_ohe(), not the generic ohe() helper.  Passing index=4 to ohe()
-    produces [4,0,0,0,0,0,0,0] (WRONG); class_to_ohe(4,8) gives the correct
-    one-hot [0,0,0,0,1,0,0,0].  For -1 (unknown), both return a zero vector,
-    but only class_to_ohe is correct for positive indices.
-
   ── 94-dim env_vec layout (must match EnvEncoder slices in backbone.py) ─────
     [0:12]   month              (12)
     [12:18]  area                (6)

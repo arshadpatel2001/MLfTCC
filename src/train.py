@@ -19,11 +19,8 @@ Usage:
         --method physirm \\
         --data_root /path/to/TCND
 
-    # No 3D data ablation
-    python train.py --mode lobo --no_3d --method erm
-
-    # Control regression loss weight
-    python train.py --mode lobo --reg_weight 0.5 --method physirm
+    # LOBO benchmark, all methods
+    python train.py --mode lobo --data_root /path/to/TCND
 """
 
 import os
@@ -138,17 +135,7 @@ BEST_HPARAMS = {
 # ── Model builder ─────────────────────────────────────────────────────────────
 
 def build_model(args) -> TropiCycloneModel:
-    return TropiCycloneModel.build(
-        model_size    = args.model_size,
-        spatial_embed = args.spatial_embed,
-        track_embed   = args.track_embed,
-        env_embed     = args.env_embed,
-        phys_dim      = args.phys_dim,
-        final_dim     = args.final_dim,
-        dropout       = args.dropout,
-        use_3d        = not args.no_3d,
-        use_env       = not args.no_env,
-    )
+    return TropiCycloneModel.build()
 
 
 # ── Single training run ───────────────────────────────────────────────────────
@@ -211,28 +198,28 @@ def _train_one_experiment_inner(
     train_loaders_per_env = make_per_basin_loaders(
         root=args.data_root, basins=source_basins,
         batch_size=bs, num_workers=args.num_workers,
-        use_3d=not args.no_3d, use_env=not args.no_env,
+        use_3d=True, use_env=True,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
         **_resolve_split(data_mode, "train"),
     )
     val_loader_src = make_dataloader(
         root=args.data_root, basins=source_basins,
         batch_size=bs, num_workers=args.num_workers,
-        use_3d=not args.no_3d, use_env=not args.no_env,
+        use_3d=True, use_env=True,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
         **_resolve_split(data_mode, "val"),
     )
     val_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
         batch_size=bs, num_workers=args.num_workers,
-        use_3d=not args.no_3d, use_env=not args.no_env,
+        use_3d=True, use_env=True,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
         **_resolve_split(data_mode, "val"),
     )
     test_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
         batch_size=bs, num_workers=args.num_workers,
-        use_3d=not args.no_3d, use_env=not args.no_env,
+        use_3d=True, use_env=True,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
         **_resolve_split(data_mode, "test"),
     )
@@ -250,8 +237,6 @@ def _train_one_experiment_inner(
     method_kwargs = {k: v for k, v in hp.items()
                      if k not in {"lr", "batch_size", "weight_decay"}}
 
-    # Regression loss weight injected from CLI
-    method_kwargs["reg_weight"] = getattr(args, "reg_weight", 0.5)
 
     n_batches_estimate = max(1, max(len(l) for l in train_loaders_per_env.values()))
 
@@ -595,33 +580,6 @@ def _train_one_experiment_inner(
         "best_ckpt": best_ckpt,
     }
 
-    # ── Few-shot fine-tuning (optional) ───────────────────────────────────────
-    if args.few_shot:
-        fs = few_shot_finetune(
-            model=model, target_basin=target_basin,
-            args=args, device=device,
-            k_shots=args.k_shots, ft_epochs=args.few_shot_epochs,
-        )
-        result.update({
-            "few_shot target accuracy intensity":          fs.accuracy_intensity,
-            "few_shot target precision intensity":         fs.precision_intensity,
-            "few_shot target recall intensity":            fs.recall_intensity,
-            "few_shot target f1 intensity":                fs.f1_intensity,
-            "few_shot target accuracy direction":          fs.accuracy_direction,
-            "few_shot target precision direction":         fs.precision_direction,
-            "few_shot target recall direction":            fs.recall_direction,
-            "few_shot target f1 direction":                fs.f1_direction,
-            "few_shot target rapid intensification f1":    fs.rapid_intensification_f1,
-            "few_shot target mae wind ms":                 fs.mae_wind_ms,
-            "few_shot target mae pres hpa":                fs.mae_pres_hpa,
-        })
-        log.info(
-            f"Few-shot ({args.k_shots}-shot) {target_basin}: "
-            f"acc_int={fs.accuracy_intensity:.3f} f1_int={fs.f1_intensity:.3f} "
-            f"ri_f1={fs.rapid_intensification_f1:.3f} "
-            f"mae_wnd={fs.mae_wind_ms:.2f}m/s mae_prs={fs.mae_pres_hpa:.2f}hPa"
-        )
-
     return result
 
 
@@ -646,7 +604,7 @@ def few_shot_finetune(
 
     shot_ds = TCNDDataset(
         root=args.data_root, basins=[target_basin],
-        use_3d=not args.no_3d, use_env=not args.no_env,
+        use_3d=True, use_env=True,
         cache=getattr(args, "cache_data", False),
         **_resolve_split(data_mode, "train"),
     )
@@ -722,7 +680,7 @@ def few_shot_finetune(
     test_loader = make_dataloader(
         root=args.data_root, basins=[target_basin],
         batch_size=64, num_workers=0,
-        use_3d=not args.no_3d, use_env=not args.no_env,
+        use_3d=True, use_env=True,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
         **_resolve_split(data_mode, "test"),
     )
@@ -986,26 +944,7 @@ def parse_args():
                    help="LR scheduler (cosine=CosineAnnealingLR, onecycle=OneCycleLR)")
     p.add_argument("--fail_fast",  action="store_true")
 
-    # Model architecture
-    p.add_argument("--model_size", choices=["lightweight", "complex"],
-                   default="lightweight")
-    p.add_argument("--spatial_embed", type=int, default=None)
-    p.add_argument("--track_embed",   type=int, default=None)
-    p.add_argument("--env_embed",     type=int, default=None)
-    p.add_argument("--phys_dim",      type=int, default=None)
-    p.add_argument("--final_dim",     type=int, default=None)
-    p.add_argument("--dropout",       type=float, default=0.1)
-
-    # Loss weights
-    p.add_argument("--reg_weight", type=float, default=0.5,
-                   help="Weight on the 24h-ahead intensity regression (MSE) loss "
-                        "(0 = classification only; 1 = equal weight)")
-
     # Ablations
-    p.add_argument("--no_3d",  action="store_true",
-                   help="Disable Data_3d spatial branch")
-    p.add_argument("--no_env", action="store_true",
-                   help="Disable Env-Data branch")
     p.add_argument("--no_tqdm", action="store_true")
 
     # Performance
@@ -1013,11 +952,6 @@ def parse_args():
                    help="torch.compile (A100/H100 speedup)")
     p.add_argument("--cache_data",  action="store_true",
                    help="Cache full dataset in RAM (~50 GB)")
-
-    # Few-shot
-    p.add_argument("--few_shot",        action="store_true")
-    p.add_argument("--k_shots",         type=int, default=32)
-    p.add_argument("--few_shot_epochs", type=int, default=5)
 
     p.add_argument("--resume", default=None,
                    help="Path to checkpoint to resume from (or 'latest' to auto-find in output_dir)")
