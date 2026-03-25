@@ -13,6 +13,13 @@ Architecture:
 For PhysIRM, the final representation is split into:
   z_phys ← physics-feature sub-space (invariant across basins)
   z_env  ← synoptic sub-space (basin-specific, allowed to shift)
+
+Prediction heads:
+  1. Intensity change classification  (n_intensity classes, default 4)
+  2. Direction classification          (n_direction classes, default 8)
+  3. Intensity regression              (2 outputs: wind_norm, pres_norm)
+     Predicts the 24h-ahead wind speed and pressure in the same normalized
+     units as the Data_1d WND_norm / PRES_norm columns.
 """
 
 import math
@@ -112,9 +119,10 @@ class SpatialEncoder(nn.Module):
         self.gmp = nn.AdaptiveMaxPool2d(1)
 
         # Pressure-level MLP projection (projects full spatial feature to embed_dim)
+        # SiLU (Swish) is fused in cuDNN on A100 and slightly outperforms ReLU.
         self.level_attn = nn.Sequential(
             nn.Linear(512 * 2, 128),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(128, embed_dim),
             nn.LayerNorm(embed_dim),
         )
@@ -126,6 +134,8 @@ class SpatialEncoder(nn.Module):
         Returns:
             z: (B, embed_dim) spatial feature vector
         """
+        # Channels-last (NHWC) format gives 2× conv2d throughput on A100 Ampere.
+        x = x.to(memory_format=torch.channels_last)
         h = self.stem(x)
         h = self.layer1(h)
         h = self.layer2(h)
@@ -444,11 +454,14 @@ class MultimodalBackbone(nn.Module):
 
 class TaskHeads(nn.Module):
     """
-    Two-task prediction heads:
-      1. Intensity change classification (5 classes)
-      2. Direction classification (8 classes)
+    Three-task prediction heads:
+      1. Intensity change classification (n_intensity classes, default 4)
+      2. Direction classification         (n_direction classes, default 8)
+      3. Intensity regression             (2 outputs: wind_norm, pres_norm)
+         Predicts the 24h-ahead wind speed and central pressure in the same
+         normalized units as the TCND Data_1d WND_norm / PRES_norm columns.
 
-    Designed to share the same backbone, with separate final layers.
+    All three heads share the same backbone representation z.
     """
 
     def __init__(self, in_dim: int = 128, n_intensity: int = 4, n_direction: int = 8,
@@ -469,13 +482,30 @@ class TaskHeads(nn.Module):
             nn.Linear(128, n_direction),
         )
 
-    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Regression head: predicts [wind_norm, pres_norm] 24h ahead.
+        # Output is unbounded (MSE loss with NaN mask is used in dg_methods.py).
+        self.regression_head = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 2),   # [wind_norm, pres_norm]
+        )
+
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
+        Args:
+            z: (B, in_dim) joint representation from backbone
+
         Returns:
-            logits_intensity: (B, 5)
-            logits_direction:  (B, 8)
+            logits_intensity: (B, n_intensity)  classification logits
+            logits_direction:  (B, n_direction)  classification logits
+            pred_reg:          (B, 2)            [wind_norm, pres_norm] regression
         """
-        return self.intensity_head(z), self.direction_head(z)
+        return (
+            self.intensity_head(z),
+            self.direction_head(z),
+            self.regression_head(z),
+        )
 
 
 # ── Full model ────────────────────────────────────────────────────────────────
@@ -486,6 +516,12 @@ class TropiCycloneModel(nn.Module):
 
     Methods call backbone.forward() then heads.forward().
     The model exposes both z_phys and z_env for DG algorithms.
+
+    Output dict keys:
+      z, z_phys, z_phys_raw, z_env  — representations
+      logits_intensity               — (B, n_intensity) classification logits
+      logits_direction               — (B, n_direction)  classification logits
+      pred_intensity_reg             — (B, 2) regression: [wind_norm, pres_norm]
     """
 
     def __init__(self, backbone: MultimodalBackbone, heads: TaskHeads):
@@ -495,11 +531,12 @@ class TropiCycloneModel(nn.Module):
 
     def forward(self, batch: dict) -> dict:
         feat = self.backbone(batch)
-        logits_int, logits_dir = self.heads(feat["z"])
+        logits_int, logits_dir, pred_reg = self.heads(feat["z"])
         return {
             **feat,
-            "logits_intensity": logits_int,
-            "logits_direction":  logits_dir,
+            "logits_intensity":  logits_int,
+            "logits_direction":   logits_dir,
+            "pred_intensity_reg": pred_reg,   # (B, 2): [wind_norm, pres_norm]
         }
 
     @classmethod
@@ -534,4 +571,11 @@ class TropiCycloneModel(nn.Module):
             model_size=model_size,
         )
         heads = TaskHeads(in_dim=final_dim, dropout=dropout)
-        return cls(backbone, heads)
+        model = cls(backbone, heads)
+        # Convert conv layers to NHWC channels-last layout for A100 throughput.
+        # Non-conv modules (Linear, LayerNorm) are unaffected.
+        if backbone.spatial_enc is not None:
+            backbone.spatial_enc = backbone.spatial_enc.to(
+                memory_format=torch.channels_last
+            )
+        return model

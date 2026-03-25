@@ -6,7 +6,7 @@ Implements all evaluation metrics for our NeurIPS/ICLR submission:
   Standard:
     - Per-class accuracy, weighted-F1 for intensity classification
     - Accuracy for direction classification
-    - Mean Absolute Error on wind speed (regression equivalent)
+    - Mean Absolute Error on wind speed and pressure (regression)
 
   Novel (proposed in this paper):
     - Basin Transfer Gap (BTG): measures cross-basin generalisation
@@ -16,6 +16,11 @@ Implements all evaluation metrics for our NeurIPS/ICLR submission:
   DG-specific:
     - Domain gap estimation via CORAL distance
     - Per-basin performance breakdown table (for paper Table 1)
+
+Regression targets (y_wind_reg, y_pres_reg) are in the same normalized units
+as the TCND Data_1d WND_norm / PRES_norm columns.  MAE is reported both in
+normalized units and in physical units (m/s and hPa) using the denormalization
+constants from dataset.REG_DENORM.
 """
 
 from __future__ import annotations
@@ -51,6 +56,23 @@ INTENSITY_CLASSES = {
 
 DIRECTION_CLASSES = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
+# Scale factors for converting regression MAE from normalized units to physical units.
+#
+# Full denormalization formula (from TCND paper Equations 3–4):
+#   WND_ms   = WND_norm  * 25 + 40
+#   PRES_hPa = PRES_norm * 50 + 960
+#
+# For MAE the additive offset always cancels:
+#   MAE_ms = E[|pred_ms - true_ms|]
+#          = E[|(pred_norm*25+40) - (true_norm*25+40)|]
+#          = 25 * E[|pred_norm - true_norm|]
+#          = 25 * MAE_norm
+#
+# Therefore only the scale factor is needed here.  If you ever need to convert
+# absolute predictions (not MAE) use: WND_ms = norm * 25 + 40  /  PRES_hPa = norm * 50 + 960
+_WND_SCALE  = 25.0   # m/s per normalized unit
+_PRES_SCALE = 50.0   # hPa per normalized unit
+
 
 # ── Result containers ─────────────────────────────────────────────────────────
 
@@ -59,6 +81,8 @@ class BasinResult:
     """Per-basin evaluation result."""
     basin:        str
     n_samples:    int
+
+    # ── Classification metrics ────────────────────────────────────────────────
     accuracy_intensity:  float
     precision_intensity: float
     recall_intensity:    float
@@ -67,6 +91,24 @@ class BasinResult:
     precision_direction: float
     recall_direction:    float
     f1_direction:        float
+
+    # ── Rapid Intensification (RI) skill metrics — class 3 ───────────────────
+    # RI = Rapid Intensification (class 3 in the 4-class schema).
+    # These are per-class precision / recall / F1 for class 3 only, which is the
+    # most safety-critical outcome and therefore reported separately.
+    rapid_intensification_precision: float = 0.0
+    rapid_intensification_recall:    float = 0.0
+    rapid_intensification_f1:        float = 0.0
+
+    # ── Intensity regression metrics ─────────────────────────────────────────
+    # Regression targets are 24h-ahead wind speed and central pressure in the
+    # same normalized units as Data_1d WND_norm / PRES_norm.
+    # NaN samples (end-of-storm) are excluded from MAE computation.
+    mae_wind_norm: float = 0.0   # MAE in normalized units
+    mae_pres_norm: float = 0.0   # MAE in normalized units
+    mae_wind_ms:   float = 0.0   # MAE in m/s   (denormalized: norm * 25)
+    mae_pres_hpa:  float = 0.0   # MAE in hPa   (denormalized: norm * 50)
+    n_reg_samples: int   = 0     # number of valid (non-NaN) regression samples
 
 
 @dataclass
@@ -86,7 +128,7 @@ class TransferResult:
     source_recall_direction: float
     source_f1_direction: float
 
-    # Zero-shot target performance
+    # Zero-shot target performance — classification
     target_accuracy_intensity:   float
     target_precision_intensity: float
     target_recall_intensity: float
@@ -96,9 +138,13 @@ class TransferResult:
     target_recall_direction: float
     target_f1_direction: float
 
+    # Zero-shot target performance — regression
+    target_mae_wind_ms:  float = 0.0
+    target_mae_pres_hpa: float = 0.0
+
     # Proposed metrics
-    btg:   float  # Basin Transfer Gap
-    bnte:  float  # Basin-Normalized Transfer Efficiency
+    btg:   float = 0.0   # Basin Transfer Gap
+    bnte:  float = 0.0   # Basin-Normalized Transfer Efficiency
 
     # Per-basin breakdown
     per_basin: Dict[str, BasinResult] = field(default_factory=dict)
@@ -144,6 +190,32 @@ def weighted_metrics(preds: torch.Tensor, labels: torch.Tensor, n_classes: int) 
     return float(w_prec), float(w_rec), float(w_f1)
 
 
+def ri_skill_metrics(
+    preds: torch.Tensor, labels: torch.Tensor, ri_class: int = 3
+) -> Tuple[float, float, float]:
+    """
+    Precision, Recall, and F1 for the Rapid Intensification class.
+
+    Args:
+        preds:    (N,) predicted class indices
+        labels:   (N,) ground-truth class indices
+        ri_class: index of the RI class (default: 3)
+
+    Returns:
+        (precision, recall, f1) for the RI class
+    """
+    if len(labels) == 0:
+        return 0.0, 0.0, 0.0
+
+    tp = float(((preds == ri_class) & (labels == ri_class)).sum().item())
+    fp = float(((preds == ri_class) & (labels != ri_class)).sum().item())
+    fn = float(((preds != ri_class) & (labels == ri_class)).sum().item())
+
+    prec = tp / (tp + fp + 1e-8)
+    rec  = tp / (tp + fn + 1e-8)
+    f1   = 2.0 * prec * rec / (prec + rec + 1e-8)
+
+    return float(prec), float(rec), float(f1)
 
 
 # ── Novel Metric: Basin Transfer Gap (BTG) ───────────────────────────────────
@@ -245,19 +317,42 @@ class BasinEvaluator:
     def __init__(self, basin_name: str = "unknown", collect_features: bool = False):
         self.basin_name = basin_name
         self._collect_features = collect_features
+
+        # Classification
         self._preds_int  : List[torch.Tensor] = []
         self._labels_int : List[torch.Tensor] = []
         self._preds_dir  : List[torch.Tensor] = []
         self._labels_dir : List[torch.Tensor] = []
+
+        # Regression (24h-ahead wind and pressure)
+        self._preds_wind  : List[torch.Tensor] = []   # model predictions (normalized)
+        self._labels_wind : List[torch.Tensor] = []   # ground-truth (normalized, may have NaN)
+        self._preds_pres  : List[torch.Tensor] = []
+        self._labels_pres : List[torch.Tensor] = []
+
+        # Feature vectors (optional, for CORAL distance analysis)
         self._features   : List[torch.Tensor] = []
 
     def update(self, batch: dict, out: dict):
+        # ── Classification ────────────────────────────────────────────────────
         self._preds_int.append(out["logits_intensity"].argmax(-1).detach())
         self._labels_int.append(batch["y_intensity"].detach())
-        
         self._preds_dir.append(out["logits_direction"].argmax(-1).detach())
         self._labels_dir.append(batch["y_direction"].detach())
-        
+
+        # ── Regression ───────────────────────────────────────────────────────
+        # pred_intensity_reg is (B, 2): column 0 = wind, column 1 = pres
+        if "pred_intensity_reg" in out:
+            pred_reg = out["pred_intensity_reg"].detach()          # (B, 2)
+            self._preds_wind.append(pred_reg[:, 0].cpu())
+            self._preds_pres.append(pred_reg[:, 1].cpu())
+
+        if "y_wind_reg" in batch:
+            self._labels_wind.append(batch["y_wind_reg"].detach().cpu())
+        if "y_pres_reg" in batch:
+            self._labels_pres.append(batch["y_pres_reg"].detach().cpu())
+
+        # ── Features (optional) ───────────────────────────────────────────────
         if self._collect_features and "z" in out:
             self._features.append(out["z"].detach().cpu())
 
@@ -265,9 +360,19 @@ class BasinEvaluator:
         if not self._preds_int:
             return BasinResult(
                 basin=self.basin_name, n_samples=0,
-                accuracy_intensity=0.0, precision_intensity=0.0, recall_intensity=0.0, f1_intensity=0.0,
-                accuracy_direction=0.0, precision_direction=0.0, recall_direction=0.0, f1_direction=0.0,
+                accuracy_intensity=0.0, precision_intensity=0.0,
+                recall_intensity=0.0,   f1_intensity=0.0,
+                accuracy_direction=0.0, precision_direction=0.0,
+                recall_direction=0.0,   f1_direction=0.0,
+                rapid_intensification_precision=0.0,
+                rapid_intensification_recall=0.0,
+                rapid_intensification_f1=0.0,
+                mae_wind_norm=0.0, mae_pres_norm=0.0,
+                mae_wind_ms=0.0,   mae_pres_hpa=0.0,
+                n_reg_samples=0,
             )
+
+        # ── Classification ────────────────────────────────────────────────────
         pi = torch.cat(self._preds_int)
         li = torch.cat(self._labels_int)
         pd = torch.cat(self._preds_dir)
@@ -275,6 +380,32 @@ class BasinEvaluator:
 
         pi_p, pi_r, pi_f = weighted_metrics(pi, li, n_classes=4)
         pd_p, pd_r, pd_f = weighted_metrics(pd, ld, n_classes=8)
+
+        # ── Rapid Intensification skill ───────────────────────────────────────
+        ri_prec, ri_rec, ri_f1 = ri_skill_metrics(pi, li, ri_class=3)
+
+        # ── Regression MAE ────────────────────────────────────────────────────
+        mae_wnd_norm = mae_prs_norm = 0.0
+        mae_wnd_ms   = mae_prs_hpa  = 0.0
+        n_reg = 0
+
+        if self._preds_wind and self._labels_wind:
+            pw = torch.cat(self._preds_wind)   # (N,)
+            lw = torch.cat(self._labels_wind)  # (N,), may contain NaN
+            pp = torch.cat(self._preds_pres)   # (N,)
+            lp = torch.cat(self._labels_pres)  # (N,), may contain NaN
+
+            # Mask: only samples where BOTH targets are finite
+            mask = torch.isfinite(lw) & torch.isfinite(lp)
+            n_reg = int(mask.sum().item())
+
+            if n_reg > 0:
+                mae_wnd_norm = float((pw[mask] - lw[mask]).abs().mean().item())
+                mae_prs_norm = float((pp[mask] - lp[mask]).abs().mean().item())
+                # Convert to physical units using scale factor only.
+                # Offset cancels in MAE — see _WND_SCALE / _PRES_SCALE comment above.
+                mae_wnd_ms  = mae_wnd_norm * _WND_SCALE
+                mae_prs_hpa = mae_prs_norm * _PRES_SCALE
 
         return BasinResult(
             basin        = self.basin_name,
@@ -287,6 +418,14 @@ class BasinEvaluator:
             precision_direction = pd_p,
             recall_direction    = pd_r,
             f1_direction        = pd_f,
+            rapid_intensification_precision = ri_prec,
+            rapid_intensification_recall    = ri_rec,
+            rapid_intensification_f1        = ri_f1,
+            mae_wind_norm  = mae_wnd_norm,
+            mae_pres_norm  = mae_prs_norm,
+            mae_wind_ms    = mae_wnd_ms,
+            mae_pres_hpa   = mae_prs_hpa,
+            n_reg_samples  = n_reg,
         )
 
     def get_features(self) -> Optional[torch.Tensor]:
@@ -299,6 +438,10 @@ class BasinEvaluator:
         self._labels_int.clear()
         self._preds_dir.clear()
         self._labels_dir.clear()
+        self._preds_wind.clear()
+        self._labels_wind.clear()
+        self._preds_pres.clear()
+        self._labels_pres.clear()
         self._features.clear()
 
 
@@ -417,6 +560,8 @@ class TransferEvaluator:
             target_precision_direction = target_r.precision_direction,
             target_recall_direction    = target_r.recall_direction,
             target_f1_direction        = target_r.f1_direction,
+            target_mae_wind_ms         = target_r.mae_wind_ms,
+            target_mae_pres_hpa        = target_r.mae_pres_hpa,
             btg             = btg,
             bnte            = bnte,
             per_basin       = per_basin_results,
@@ -427,12 +572,12 @@ class TransferEvaluator:
     def print_table(self, results: Optional[List[TransferResult]] = None):
         """
         Print a LaTeX-style results table (for copy-paste into the paper).
-        Columns: Method | Target Basin | Accuracy Intensity | Accuracy Direction | Basin Transfer Gap | Basin-Normalized Transfer Efficiency
         """
         rs = results or self.results
         header = (
-            f"{'Method':<20} {'Target':<10} {'Accuracy Intensity':>20} {'Accuracy Direction':>20} "
-            f"{'Basin Transfer Gap':>20} {'Basin-Normalized Transfer Efficiency':>38}"
+            f"{'Method':<20} {'Target':<10} {'Acc Intensity':>15} {'Acc Direction':>15} "
+            f"{'MAE Wind(m/s)':>15} {'MAE Pres(hPa)':>15} "
+            f"{'BTG':>10} {'BNTE':>10}"
         )
         sep = "─" * len(header)
         print(sep)
@@ -441,8 +586,9 @@ class TransferEvaluator:
         for r in rs:
             print(
                 f"{r.method:<20} {r.target_basin:<10} "
-                f"{r.target_accuracy_intensity:>20.3f} {r.target_accuracy_direction:>20.3f} "
-                f"{r.btg:>20.3f} {r.bnte:>38.3f}"
+                f"{r.target_accuracy_intensity:>15.3f} {r.target_accuracy_direction:>15.3f} "
+                f"{r.target_mae_wind_ms:>15.2f} {r.target_mae_pres_hpa:>15.2f} "
+                f"{r.btg:>10.3f} {r.bnte:>10.3f}"
             )
         print(sep)
 
@@ -460,6 +606,8 @@ class TransferEvaluator:
                 "target precision direction": r.target_precision_direction,
                 "target recall direction": r.target_recall_direction,
                 "target f1 direction": r.target_f1_direction,
+                "target mae wind ms":  r.target_mae_wind_ms,
+                "target mae pres hpa": r.target_mae_pres_hpa,
                 "btg":     r.btg,
                 "bnte":    r.bnte,
             }

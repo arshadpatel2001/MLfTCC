@@ -2,20 +2,62 @@
 TCND Dataset Module for Basin Generalization
 =============================================
 Handles loading of all three TCND modalities:
-  - Data_1d: tabular IBTrACS (CSV)
-  - Data_3d: ERA5 gridded patches (NetCDF/zarr)
-  - Env-Data: pre-computed environmental features (pickle/json)
+  - Data_1d: tabular IBTrACS (.txt files)
+  - Data_3d: ERA5 gridded patches (NetCDF4/HDF5)
+  - Env-Data: pre-computed environmental features (.npy dicts)
 
 Basin codes: WP, NA, EP, NI, SI, SP
+
+Key data-format facts (verified against real TCND sample files):
+  ── Data1D .txt (8 cols, no header, whitespace-separated) ───────────────────
+    Col 0  ID          float  storm-level counter (not used)
+    Col 1  FLAG        float  quality flag (not used)
+    Col 2  LAT_norm    float  normalized latitude   → model input [1/4]
+    Col 3  LONG_norm   float  normalized longitude  → model input [0/4]
+    Col 4  WND_norm    float  normalized wind speed → model input [3/4]
+    Col 5  PRES_norm   float  normalized pressure   → model input [2/4]
+    Col 6  YYYYMMDDHH  int    timestamp (key for .nc/.npy lookup)
+    Col 7  Name        str    storm name (not used)
+
+  ── Env-Data .npy fields ────────────────────────────────────────────────────
+    month               (12,) float64   already one-hot
+    area                 (6,) float64   already one-hot
+    intensity_class      (6,) float64   already one-hot
+    wind               scalar float64   normalized current wind speed
+    move_velocity      scalar int64     normalized translation speed
+    location_long       (36,) float64   already one-hot
+    location_lat        (12,) float64   already one-hot
+    history_direction12 scalar int64    CLASS INDEX 0–7 or -1 (unknown)  ← NOT one-hot!
+    history_direction24 scalar int64    CLASS INDEX 0–7 or -1 (unknown)  ← NOT one-hot!
+    history_inte_change24 scalar int64  CLASS INDEX 0–3 or -1 (unknown)  ← NOT one-hot!
+    future_direction24  scalar int64    LABEL 0–7  or -1 (unknown)
+    future_inte_change24 scalar int64   LABEL 0–3  or -1 (unknown)
+
+    CRITICAL BUG FIX: history_direction* and history_inte_change24 are stored
+    as raw integer class indices, NOT as one-hot arrays.  They must be converted
+    with class_to_ohe(), not the generic ohe() helper.  Passing index=4 to ohe()
+    produces [4,0,0,0,0,0,0,0] (WRONG); class_to_ohe(4,8) gives the correct
+    one-hot [0,0,0,0,1,0,0,0].  For -1 (unknown), both return a zero vector,
+    but only class_to_ohe is correct for positive indices.
+
+  ── 94-dim env_vec layout (must match EnvEncoder slices in backbone.py) ─────
+    [0:12]   month              (12)
+    [12:18]  area                (6)
+    [18:24]  intensity_class     (6)
+    [24:25]  wind                (1)
+    [25:26]  move_velocity       (1)
+    [26:62]  location_long      (36)
+    [62:74]  location_lat       (12)
+    [74:82]  history_direction12  (8)  ← class index → one-hot
+    [82:90]  history_direction24  (8)  ← class index → one-hot
+    [90:94]  history_inte_change24 (4) ← class index → one-hot
 """
 
-import os
-import json
-import pickle
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 import time
 try:
@@ -26,7 +68,6 @@ except ImportError:
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-# Geoscience data loading
 try:
     import xarray as xr
 except ImportError:
@@ -39,12 +80,9 @@ except ImportError:
 
 
 # ── Basin registry ────────────────────────────────────────────────────────────
-BASIN_CODES = ["WP", "NA", "EP", "NI", "SI", "SP"]
-BASIN_TO_IDX = {b: i for i, b in enumerate(BASIN_CODES)}
+BASIN_CODES   = ["WP", "NA", "EP", "NI", "SI", "SP"]
+BASIN_TO_IDX  = {b: i for i, b in enumerate(BASIN_CODES)}
 
-# Climatological SST anomaly μ/σ per basin (computed from ERA5 1981-2010 baseline).
-# These serve as physical priors for PhysIRM. Values are illustrative; recompute
-# from your ERA5 data for the final paper.
 BASIN_SST_STATS = {
     "WP": {"mean": 29.1, "std": 1.8},
     "NA": {"mean": 27.4, "std": 2.1},
@@ -54,525 +92,368 @@ BASIN_SST_STATS = {
     "SP": {"mean": 26.5, "std": 1.5},
 }
 
-# Coriolis parameter = 2 * Omega * sin(lat). We use a basin-average latitude
-# as a physical feature. Values in 1e-5 s^-1.
 BASIN_CORIOLIS = {
-    "WP": 3.14,   # avg lat ~13°N
-    "NA": 4.87,   # avg lat ~21°N
-    "EP": 3.86,   # avg lat ~17°N
-    "NI": 3.60,   # avg lat ~15°N
-    "SI": -3.86,  # avg lat ~-17°S
-    "SP": -3.14,  # avg lat ~-13°S
+    "WP":  3.14, "NA": 4.87, "EP": 3.86,
+    "NI":  3.60, "SI": -3.86, "SP": -3.14,
 }
 
-
-# ── Normalization constants ───────────────────────────────────────────────────
-#
-# IMPORTANT: Data1D columns in TCND .txt files are ALREADY NORMALIZED by the
-# dataset authors using these formulas (see Huang et al., Nat. Comms. 2025):
-#   LONG_norm = LONG_raw_01deg / 3600   (LONG in increments of 0.1°E)
-#   LAT_norm  = (LAT_raw_01deg + 900) / 1800  (LAT in increments of 0.1°)
-#   PRES_norm = (PRES_hPa - 870) / 1080
-#   WND_norm  = WND_ms / 100
-#
-# NOTE: The paper's stated formulas produce value ranges that do NOT match
-# the actual values in the released .txt files (e.g., LAT values like -14.82
-# are outside the [0,1] range the formula would produce).  The actual
-# normalization used to produce the data may differ from the above.
-# Therefore we use the data AS-IS for model inputs (the model learns
-# to handle whatever normalization was applied) and use BASIN-LEVEL
-# physical constants for physics features rather than per-sample
-# un-normalization.
-
-NORM_1D = {
-    "LONG_scale":  3600.0,
-    "LAT_offset":  900.0,
-    "LAT_scale":   1800.0,
-    "PRES_offset": 870.0,
-    "PRES_scale":  1080.0,
-    "WND_scale":   100.0,
+# Denormalization constants for reporting regression MAE in physical units.
+# WND_ms   = WND_norm  * 25 + 40
+# PRES_hPa = PRES_norm * 50 + 960
+REG_DENORM = {
+    "WND_scale": 25.0, "WND_offset": 40.0,
+    "PRES_scale": 50.0, "PRES_offset": 960.0,
 }
 
-# Data_3d: per-variable z-score parameters (mean, std)
-NORM = {
-    "SST":   {"mean": 28.0,  "std": 3.0},    # °C (converted from Kelvin in _load_3d)
-    "GPH_200": {"mean": 122000.0, "std": 500.0},   # geopotential (m²/s²), not height
-    "GPH_500": {"mean": 57000.0,  "std": 300.0},
-    "GPH_850": {"mean": 14500.0,  "std": 250.0},
-    "GPH_925": {"mean": 7500.0,   "std": 200.0},
-    "U_200": {"mean": 0.0,  "std": 15.0},
-    "V_200": {"mean": 0.0,  "std": 10.0},
-    "U_500": {"mean": 0.0,  "std": 8.0},
-    "V_500": {"mean": 0.0,  "std": 6.0},
-    "U_850": {"mean": 0.0,  "std": 7.0},
-    "V_850": {"mean": 0.0,  "std": 6.0},
-    "U_925": {"mean": 0.0,  "std": 6.0},
-    "V_925": {"mean": 0.0,  "std": 5.0},
-}
-
-# ── Global Cache ──────────────────────────────────────────────────────────────
-# In LOBO/incremental modes, `train_one_experiment` is called iteratively,
-# which re-instantiates completely new DataLoaders. By linking them to a
-# module-level shared dictionary, the first method pays the I/O price,
-# and all subsequent methods hit RAM instantly.
-GLOBAL_CACHE: Dict = {}
+# ── Global Index/Sample Cache ─────────────────────────────────────────────────
+GLOBAL_CACHE: Dict       = {}
 GLOBAL_INDEX_CACHE: Dict = {}
-
-
-class TCNDSample:
-    """Lightweight container for one TC observation."""
-    __slots__ = ["data_1d", "data_3d", "env_data", "target_intensity",
-                 "target_direction", "basin_idx", "storm_id", "timestamp"]
-
-    def __init__(self, data_1d, data_3d, env_data,
-                 target_intensity, target_direction,
-                 basin_idx, storm_id, timestamp):
-        self.data_1d = data_1d
-        self.data_3d = data_3d
-        self.env_data = env_data
-        self.target_intensity = target_intensity
-        self.target_direction = target_direction
-        self.basin_idx = basin_idx
-        self.storm_id = storm_id
-        self.timestamp = timestamp
 
 
 class TCNDDataset(Dataset):
     """
-    Main dataset class for the TropiCycloneNet Dataset (TCND).
+    TropiCycloneNet Dataset loader.
 
-    Directory structure expected:
-        root/
-          TCND_subset/
-            Data_1d/
-              WP/  NA/  EP/  NI/  SI/  SP/   ← one CSV per storm
-            Data_3d/
-              WP/  NA/  EP/  NI/  SI/  SP/   ← one NetCDF per storm-timestep
-            Env_Data/
-              WP/  NA/  EP/  NI/  SI/  SP/   ← one pickle/json per storm-timestep
-
-    Parameters
-    ----------
-    root : str
-        Path to the TCND root directory.
-    basins : list[str]
-        List of basin codes to include (subset of BASIN_CODES).
-    split : str
-        One of {"train", "val", "test"}. Uses storm-level split.
-    train_ratio : float
-        Fraction of storms used for training within each basin.
-    val_ratio : float
-        Fraction for validation; remainder goes to test.
-    seed : int
-        Random seed for reproducible storm splits.
-    use_3d : bool
-        Whether to load Data_3d tensors. Set False for ablations.
-    use_env : bool
-        Whether to load Env-Data. Set False for ablations.
-    cache : bool
-        If True, cache loaded samples in RAM (requires ~50 GB for full dataset).
+    Each sample returns a dict with:
+      data_1d        (4,)          normalized [LONG, LAT, PRES, WND]
+      data_3d        (13, 81, 81)  per-sample z-scored ERA5 patch
+      env_data       (94,)         environmental context vector
+      phys_features  (8,)          physics priors for PhysIRM
+      basin_idx      scalar long   basin index (0–5)
+      y_intensity    scalar long   intensity change class 24h ahead (0–3)
+      y_direction    scalar long   movement direction 24h ahead    (0–7)
+      y_wind_reg     scalar float  24h-ahead WND_norm (may be NaN)
+      y_pres_reg     scalar float  24h-ahead PRES_norm (may be NaN)
     """
 
     def __init__(
         self,
         root: str,
         basins: List[str],
-        split: str = "train",
-        train_ratio: float = 0.70,
-        val_ratio: float = 0.10,
-        seed: int = 42,
-        use_3d: bool = True,
-        use_env: bool = True,
-        cache: bool = False,
+        split: str        = "train",
+        train_ratio: float = 0.70,   # kept for API compat (ignored)
+        val_ratio: float   = 0.10,   # kept for API compat (ignored)
+        seed: int          = 42,
+        use_3d: bool       = True,
+        use_env: bool      = True,
+        cache: bool        = False,
         disable_tqdm: bool = False,
     ):
-        self.root = Path(root)
-        self.basins = basins
-        self.split = split
-        self.use_3d = use_3d
-        self.use_env = use_env
-        self.cache = cache
+        self.root         = Path(root)
+        self.basins       = basins
+        self.split        = split
+        self.use_3d       = use_3d
+        self.use_env      = use_env
+        self.cache        = cache
         self.disable_tqdm = disable_tqdm
-        
-        # Point to global cache so datasets instantiated later in loops (like LOBO)
-        # can reuse the datasets loaded by the very first method!
         self._cache_dict: Dict = GLOBAL_CACHE if cache else {}
 
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
-
-        self.index: List[Dict] = []  # list of metadata dicts
+        self.index: List[Dict] = []
         self._build_index(train_ratio, val_ratio, seed)
 
-    # ── Index construction ────────────────────────────────────────────────────
+    # ── Root detection ────────────────────────────────────────────────────────
 
     def _resolve_tcnd_root(self) -> Path:
-        """
-        Auto-detect the TCND root (the folder that contains Data1D/, Data3D/, Env-Data/).
-
-        Handles the common case where the zip extracts into a same-named subfolder:
-          TCND_test/          ← user passes this as --data_root
-            TCND_test/        ← actual data lives here (double-nesting)
-              Data1D/
-              Data3D/
-              Env-Data/
-        """
         import logging
         log = logging.getLogger(__name__)
-
-        # Walk: root itself, one level down (double-nest), two levels down, parent
-        candidates = [self.root]
-        candidates += [p for p in self.root.iterdir() if p.is_dir()]   # one level down
-        candidates += [self.root.parent]
-
+        candidates = [self.root] + [p for p in self.root.iterdir() if p.is_dir()] + [self.root.parent]
         for base in candidates:
             if (base / "Data1D").exists():
-                log.info(f"TCND root detected: {base}")
+                log.info(f"TCND root: {base}")
                 return base
-
-        # rglob fallback — find any Data1D directory
         found = sorted(self.root.rglob("Data1D"))
         if found:
             tcnd_root = found[0].parent
-            log.info(f"TCND root detected (rglob): {tcnd_root}")
+            log.info(f"TCND root (rglob): {tcnd_root}")
             return tcnd_root
-
         raise FileNotFoundError(
-            f"Cannot find 'Data1D/' under '{self.root}'.\n"
-            f"Make sure --data_root points to the folder that contains "
-            f"Data1D/, Data3D/, and Env-Data/ (or their parent)."
+            f"Cannot find 'Data1D/' under '{self.root}'. "
+            f"Point --data_root at the folder containing Data1D/, Data3D/, Env-Data/."
         )
 
     @staticmethod
     def _parse_filename(stem: str, basin: str):
-        """
-        Parse TCND filename stem like 'WP2017BSTBANYAN' or 'NA2019BSTDORIAN'.
-        Returns (year, tc_name).
-        """
-        # Format: {BASIN}{YEAR}BST{NAME}
-        # basin is e.g. 'WP', year is 4 digits after basin prefix
-        prefix_len = len(basin)
-        year       = stem[prefix_len: prefix_len + 4]
-        tc_name    = stem[prefix_len + 4 + 3:]  # skip 'BST'
+        """Parse 'EP2017BSTDORA' → (year='2017', tc_name='DORA')."""
+        n = len(basin)
+        year    = stem[n: n + 4]
+        tc_name = stem[n + 4 + 3:]   # skip 'BST'
         return year, tc_name
 
+    # ── Index build ───────────────────────────────────────────────────────────
+
     def _build_index(self, train_ratio, val_ratio, seed):
-        """
-        Build sample index from TCND data.
-        The dataset already provides train/val/test splits as subfolders.
-        train_ratio and val_ratio are ignored (kept for API compatibility).
-        """
         import logging
         log = logging.getLogger(__name__)
-        
-        # ── Global Index Cache ────────────────────────────────────────────────
-        # Prevents repetitive 10-second OS-level `.txt` file system scanning during LOBO.
-        cache_key = f"{self.root}_{'-'.join(sorted(self.basins))}_{self.split}_{self.use_3d}_{self.use_env}"
+
+        cache_key = (
+            f"{self.root}_{'-'.join(sorted(self.basins))}_"
+            f"{self.split}_{self.use_3d}_{self.use_env}"
+        )
         if cache_key in GLOBAL_INDEX_CACHE:
             self.index = GLOBAL_INDEX_CACHE[cache_key].copy()
             self._tcnd_root = self._resolve_tcnd_root()
-            log.info(f"Dataset index instantly retrieved from GLOBAL_INDEX_CACHE ({len(self.index)} samples)")
+            log.info(f"Index from cache: {len(self.index)} samples")
             return
 
-        start_time = time.time()
-
+        t0 = time.time()
         self._tcnd_root = self._resolve_tcnd_root()
 
-        # Map requested split to whichever folder actually exists.
-        # Priority: exact match → any available folder (for partial downloads).
         SPLIT_ALIASES = {
             "train": ["train", "test", "val"],
             "val":   ["val",   "test", "train"],
             "test":  ["test",  "train", "val"],
         }
 
+        # Data1D column names (8 columns, no header)
+        COLS = ["ID", "FLAG", "LAT_norm", "LONG_norm",
+                "WND_norm", "PRES_norm", "YYYYMMDDHH", "Name"]
+
         for basin in self.basins:
             parent = self._tcnd_root / "Data1D" / basin
             if not parent.exists():
                 raise FileNotFoundError(
-                    f"Basin directory not found: {parent}\n"
-                    f"Available basins: {[d.name for d in (self._tcnd_root/'Data1D').iterdir() if d.is_dir()]}"
+                    f"Basin dir not found: {parent}\n"
+                    f"Available: {[d.name for d in (self._tcnd_root/'Data1D').iterdir() if d.is_dir()]}"
                 )
 
-            # Pick the first available split folder
-            split_folder = None
-            for candidate in SPLIT_ALIASES[self.split]:
-                if (parent / candidate).exists():
-                    split_folder = candidate
-                    break
-
+            split_folder = next(
+                (c for c in SPLIT_ALIASES[self.split] if (parent / c).exists()),
+                None,
+            )
             if split_folder is None:
                 raise FileNotFoundError(
-                    f"No split folders found under {parent}. "
-                    f"Expected one of: train, val, test"
+                    f"No split folder (train/val/test) under {parent}"
                 )
-
             if split_folder != self.split:
-                log.warning(
-                    f"'{self.split}' folder not found for basin {basin}; "
-                    f"using '{split_folder}' instead."
-                )
+                log.warning(f"'{self.split}' missing for {basin}; using '{split_folder}'")
 
             basin_dir = parent / split_folder
-
             txt_files = sorted(basin_dir.glob("*.txt"))
             if not txt_files:
-                raise FileNotFoundError(
-                    f"No .txt files found in {basin_dir}"
-                )
+                raise FileNotFoundError(f"No .txt files in {basin_dir}")
 
-            log.info(f"  {basin}/{split_folder}: {len(txt_files)} storm files")
+            log.info(f"  {basin}/{split_folder}: {len(txt_files)} storms")
 
-            # 8-column TCND format (no header, tab/space separated):
-            # All numeric columns are ALREADY NORMALIZED by the dataset.
-            # ID | FLAG | LAT_norm | LONG_norm | WND_norm | PRES_norm | YYYYMMDDHH | Name
-            TCND_COLS = ["ID", "FLAG", "LAT_norm", "LONG_norm",
-                         "WND_norm", "PRES_norm", "YYYYMMDDHH", "Name"]
-
-            for txt_file in tqdm(txt_files, desc=f"Loading index for {basin}/{split_folder}", dynamic_ncols=True, leave=False, disable=self.disable_tqdm):
-                stem           = txt_file.stem          # e.g. WP2017BSTBANYAN
-                year, tc_name  = self._parse_filename(stem, basin)
+            for txt_file in tqdm(
+                txt_files, desc=f"Indexing {basin}/{split_folder}",
+                dynamic_ncols=True, leave=False, disable=self.disable_tqdm,
+            ):
+                stem          = txt_file.stem
+                year, tc_name = self._parse_filename(stem, basin)
 
                 try:
-                    df = pd.read_csv(
-                        txt_file, sep=r"\s+", header=None,
-                        names=TCND_COLS, engine="python",
-                        on_bad_lines="skip",
-                    )
+                    df = pd.read_csv(txt_file, sep=r"\s+", header=None,
+                                     names=COLS, engine="python", on_bad_lines="skip")
                 except TypeError:
-                    df = pd.read_csv(
-                        txt_file, sep=r"\s+", header=None,
-                        names=TCND_COLS, engine="python",
-                    )
+                    df = pd.read_csv(txt_file, sep=r"\s+", header=None,
+                                     names=COLS, engine="python")
 
-                for _, row in df.iterrows():
-                    ts = str(int(float(row.get("YYYYMMDDHH", 0))))
+                all_rows = list(df.iterrows())
+                n_rows   = len(all_rows)
+
+                for i, (_, row) in enumerate(all_rows):
+                    ts           = str(int(float(row.get("YYYYMMDDHH", 0))))
                     data_3d_path = self._get_3d_path(basin, year, tc_name, ts)
-                    env_path = self._get_env_path(basin, year, tc_name, ts)
-                    
-                    if self.use_3d and not data_3d_path:
-                        continue
-                    if self.use_env and not env_path:
-                        continue
+                    env_path     = self._get_env_path(basin, year, tc_name, ts)
 
-                    # Filter out samples with unknown future labels (-1 sentinel).
-                    # These have no valid label for intensity or direction and would
-                    # introduce noise if trained on. One .npy peek, two checks.
+                    if self.use_3d  and data_3d_path is None: continue
+                    if self.use_env and env_path     is None: continue
+
+                    # Filter unknown labels
                     if env_path is not None:
                         try:
-                            _d = np.load(env_path, allow_pickle=True).item()
+                            _d  = np.load(env_path, allow_pickle=True).item()
                             _yi = int(np.asarray(_d.get("future_inte_change24", 0)).ravel()[0])
                             _yd = int(np.asarray(_d.get("future_direction24",   0)).ravel()[0])
                             if _yi < 0 or _yd < 0:
                                 continue
                         except Exception:
-                            pass  # if unreadable, keep the sample and let __getitem__ handle it
+                            pass
+
+                    # 24 h-ahead regression targets (row i+4 = 4 × 6 h).
+                    # TCND guarantees uniform 6-h intervals, so row i+4 is always
+                    # exactly 24 h later — but we verify the timestamp delta
+                    # defensively to guard against any irregular rows that may
+                    # appear in other basins or future dataset versions.
+                    future_wnd_norm  = np.nan
+                    future_pres_norm = np.nan
+                    if i + 4 < n_rows:
+                        fr  = all_rows[i + 4][1]
+                        _fw = float(fr.get("WND_norm",  np.nan))
+                        _fp = float(fr.get("PRES_norm", np.nan))
+                        if np.isfinite(_fw) and np.isfinite(_fp):
+                            # Verify the future row is exactly 24 h ahead.
+                            # If the interval is not 24 h (irregular data),
+                            # discard the target rather than silently use it.
+                            _delta_ok = True
+                            try:
+                                _ts_cur = str(int(float(row.get("YYYYMMDDHH", 0))))
+                                _ts_fut = str(int(float(fr.get("YYYYMMDDHH", 0))))
+                                _dt_cur = datetime.strptime(_ts_cur, "%Y%m%d%H")
+                                _dt_fut = datetime.strptime(_ts_fut, "%Y%m%d%H")
+                                _hours  = (_dt_fut - _dt_cur).total_seconds() / 3600.0
+                                if abs(_hours - 24.0) > 0.1:
+                                    _delta_ok = False
+                            except Exception:
+                                pass   # unparseable timestamp → keep target
+                            if _delta_ok:
+                                future_wnd_norm  = _fw
+                                future_pres_norm = _fp
 
                     self.index.append({
-                        "basin":     basin,
-                        "basin_idx": BASIN_TO_IDX[basin],
-                        "storm_id":  stem,
-                        "tc_name":   tc_name,
-                        "year":      year,
-                        "timestamp": ts,
-                        "csv_row":   row.to_dict(),
-                        "data_3d_path": data_3d_path,
-                        "env_path":     env_path,
+                        "basin":             basin,
+                        "basin_idx":         BASIN_TO_IDX[basin],
+                        "storm_id":          stem,
+                        "tc_name":           tc_name,
+                        "year":              year,
+                        "timestamp":         ts,
+                        "csv_row":           row.to_dict(),
+                        "data_3d_path":      data_3d_path,
+                        "env_path":          env_path,
+                        "future_wnd_norm":   future_wnd_norm,
+                        "future_pres_norm":  future_pres_norm,
                     })
-        
-        log.info(f"Dataset index built in {time.time() - start_time:.2f}s with {len(self.index)} samples")
+
+        log.info(f"Index built in {time.time()-t0:.2f}s: {len(self.index)} samples")
         GLOBAL_INDEX_CACHE[cache_key] = self.index.copy()
 
-    def _get_3d_path(self, basin: str, year: str, tc_name: str, ts: str) -> Optional[Path]:
-        """
-        Data3D/{basin}/{year}/{tc_name}/TCND_{tc_name}_{ts}_sst_z_u_v.nc
-        """
+    def _get_3d_path(self, basin, year, tc_name, ts) -> Optional[Path]:
         p = (self._tcnd_root / "Data3D" / basin / year / tc_name
              / f"TCND_{tc_name}_{ts}_sst_z_u_v.nc")
         return p if p.exists() else None
 
-    def _get_env_path(self, basin: str, year: str, tc_name: str, ts: str) -> Optional[Path]:
-        """
-        Env-Data/{basin}/{year}/{tc_name}/{ts}.npy
-        """
+    def _get_env_path(self, basin, year, tc_name, ts) -> Optional[Path]:
         p = self._tcnd_root / "Env-Data" / basin / year / tc_name / f"{ts}.npy"
         return p if p.exists() else None
 
-    # ── Item loading ──────────────────────────────────────────────────────────
+    # ── Dataset protocol ──────────────────────────────────────────────────────
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.index)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx):
         meta = self.index[idx]
-        key = (meta["basin"], meta["storm_id"], meta["timestamp"])
-
+        key  = (meta["basin"], meta["storm_id"], meta["timestamp"])
         if self.cache and key in self._cache_dict:
             return self._cache_dict[key]
-
         sample = self._load_sample(meta)
-
         if self.cache:
             self._cache_dict[key] = sample
-
         return sample
+
+    # ── Sample loader ─────────────────────────────────────────────────────────
 
     def _load_sample(self, meta: Dict) -> Dict[str, torch.Tensor]:
         row = meta["csv_row"]
 
-        # ── Data_1d ──────────────────────────────────────────────────────────
-        # TCND txt columns are ALREADY NORMALIZED by the dataset authors.
-        # ID, FLAG, LAT_norm, LONG_norm, WND_norm, PRES_norm, YYYYMMDDHH, Name
+        # Data_1d — already normalized by dataset authors
         lat_norm  = float(row.get("LAT_norm",  0.0))
         long_norm = float(row.get("LONG_norm", 0.0))
         wnd_norm  = float(row.get("WND_norm",  0.0))
         pres_norm = float(row.get("PRES_norm", 0.0))
-        data_1d   = torch.tensor([long_norm, lat_norm, pres_norm, wnd_norm],
-                                  dtype=torch.float32)
+        data_1d   = torch.tensor(
+            [long_norm, lat_norm, pres_norm, wnd_norm], dtype=torch.float32
+        )
 
-        # ── Data_3d ───────────────────────────────────────────────────────────
-        if self.use_3d:
-            data_3d = self._load_3d(meta["data_3d_path"])
-        else:
-            # C = SST(1) + Z×4 + U×4 + V×4 = 13 channels, H=W=81
-            data_3d = torch.zeros(13, 81, 81, dtype=torch.float32)
+        # Data_3d
+        data_3d = (
+            self._load_3d(meta["data_3d_path"])
+            if self.use_3d
+            else torch.zeros(13, 81, 81, dtype=torch.float32)
+        )
 
-        # ── Env-Data ─────────────────────────────────────────────────────────
-        # CRITICAL: We must ALWAYS load the targets from env_path, even if we ablate env_vec
+        # Env-Data
         env_vec_full, y_intensity, y_direction = self._load_env(meta["env_path"])
-        if self.use_env:
-            env_vec = env_vec_full
-        else:
-            env_vec = torch.zeros(94, dtype=torch.float32)
+        env_vec = env_vec_full if self.use_env else torch.zeros(94, dtype=torch.float32)
 
-        # ── Physics features (for PhysIRM) ───────────────────────────────────
+        # Physics features
         phys = self._compute_physics_features(row, meta["basin"], data_3d)
 
+        # Regression targets (NaN for end-of-storm rows)
+        y_wind_reg = torch.tensor(float(meta.get("future_wnd_norm",  float("nan"))), dtype=torch.float32)
+        y_pres_reg = torch.tensor(float(meta.get("future_pres_norm", float("nan"))), dtype=torch.float32)
+
         return {
-            "data_1d":       data_1d.to(torch.float32),                  # (4,)
-            "data_3d":       data_3d.to(torch.float32),                  # (13, 81, 81)
-            "env_data":      env_vec.to(torch.float32),                  # (77,)
-            "phys_features": phys.to(torch.float32),                     # (8,)
+            "data_1d":       data_1d,
+            "data_3d":       data_3d.to(torch.float32),
+            "env_data":      env_vec.to(torch.float32),
+            "phys_features": phys.to(torch.float32),
             "basin_idx":     torch.tensor(meta["basin_idx"], dtype=torch.long),
             "y_intensity":   torch.tensor(y_intensity,       dtype=torch.long),
             "y_direction":   torch.tensor(y_direction,       dtype=torch.long),
+            "y_wind_reg":    y_wind_reg,
+            "y_pres_reg":    y_pres_reg,
         }
 
-    # ── Modality loaders ─────────────────────────────────────────────────────
+    # ── Modality loaders ──────────────────────────────────────────────────────
 
     def _load_3d(self, path: Path) -> torch.Tensor:
         """
-        Load ERA5 patch from NetCDF.
-        Variables: sst (H,W), z/u/v (time=1, pressure_level=4, H, W)
-        pressure_levels: [200, 500, 850, 925] hPa
-        SST is in Kelvin with large fill values (~9.97e36) for land/missing.
-        Returns (13, H, W) tensor: [u×4, v×4, z×4, sst]
+        Load NetCDF4 ERA5 patch → (13, H, W) per-sample z-scored tensor.
+        Variable order after stacking: u×4, v×4, z×4, sst×1 = 13 channels.
         """
         if nc is not None:
-            # Use netCDF4 for raw speed (significantly faster metadata/open than xarray)
-            ds = nc.Dataset(path, 'r')
-            
-            # SST: (1, H, W) or (H, W)
-            sst_var = ds.variables["sst"]
-            sst_raw = sst_var[:].astype(np.float32)
-            if sst_raw.ndim == 3: 
-                sst_raw = sst_raw[0]
-            
-            # z, u, v: (1, 4, H, W)
-            z = ds.variables["z"][:].astype(np.float32)
-            u = ds.variables["u"][:].astype(np.float32)
-            v = ds.variables["v"][:].astype(np.float32)
+            ds      = nc.Dataset(path, "r")
+            sst_raw = ds.variables["sst"][:].astype(np.float32)
+            z       = ds.variables["z"][:].astype(np.float32)
+            u       = ds.variables["u"][:].astype(np.float32)
+            v       = ds.variables["v"][:].astype(np.float32)
             ds.close()
-            
-            if z.ndim == 4: z = z[0]
-            if u.ndim == 4: u = u[0]
-            if v.ndim == 4: v = v[0]
         elif xr is not None:
-            # Fallback to xarray if netCDF4 is missing (slower)
-            ds = xr.open_dataset(path)
+            ds      = xr.open_dataset(path)
             sst_raw = ds["sst"].values.astype(np.float32)
-            if sst_raw.ndim == 3: sst_raw = sst_raw[0]
-            z = ds["z"].values.astype(np.float32)
-            u = ds["u"].values.astype(np.float32)
-            v = ds["v"].values.astype(np.float32)
+            z       = ds["z"].values.astype(np.float32)
+            u       = ds["u"].values.astype(np.float32)
+            v       = ds["v"].values.astype(np.float32)
             ds.close()
         else:
-            raise ImportError("Neither 'netCDF4' nor 'xarray' is installed. At least one is required to load .nc files.")
+            raise ImportError("Neither 'netCDF4' nor 'xarray' is installed.")
 
-        # mask large fill values (> 1e10)
-        sst_raw[sst_raw > 1e10] = np.nan
+        # Remove any leading time dimension: (1,4,H,W) → (4,H,W), (1,H,W) → (H,W)
+        if sst_raw.ndim == 3: sst_raw = sst_raw[0]
+        if z.ndim  == 4:      z  = z[0]
+        if u.ndim  == 4:      u  = u[0]
+        if v.ndim  == 4:      v  = v[0]
 
-        if z.ndim == 4: z = z[0]
-        if u.ndim == 4: u = u[0]
-        if v.ndim == 4: v = v[0]
+        sst_raw[sst_raw > 1e10] = np.nan   # mask land/fill
 
         H, W = sst_raw.shape
-
         chs = []
-        for arr in [u, v, z]:
+        for arr in (u, v, z):
             for i in range(4):
-                lev = arr[i] if i < arr.shape[0] else np.zeros((H, W), dtype=np.float32)
-                chs.append(lev)
+                chs.append(arr[i] if i < arr.shape[0] else np.zeros((H, W), np.float32))
         chs.append(sst_raw)
 
-        data_3d = np.stack(chs, axis=0)
+        data_3d = np.stack(chs, axis=0)   # (13, H, W)
 
-        # Vectorized per-channel normalisation per-sample (replaces the 13-iteration loop)
-        # data_3d shape: (13, 81, 81)
-        # mask is (13, 81, 81)
-        nan_mask = np.isnan(data_3d)
-        
-        # Calculate mean/std for each channel, ignoring NaNs
-        # We use a masked array to simplify mean/std across channels
-        masked_data = np.ma.masked_array(data_3d, mask=nan_mask)
-        mus = masked_data.mean(axis=(1, 2), dtype=np.float32).data     # (13,)
-        stds = masked_data.std(axis=(1, 2), dtype=np.float32).data   # (13,)
-        stds = np.maximum(stds, 1e-6)
-        
-        # Fill NaNs with channel means
+        # Per-channel z-score using boolean masking (avoids masked_array overhead).
+        # Fill NaN/land pixels with the channel mean before normalising.
         for c in range(13):
-            data_3d[c][nan_mask[c]] = mus[c]
-            
-        # Standardize: (X - mu) / std
-        data_3d = (data_3d - mus[:, None, None]) / stds[:, None, None]
+            finite = np.isfinite(data_3d[c])
+            mu     = float(data_3d[c][finite].mean()) if finite.any() else 0.0
+            std    = float(data_3d[c][finite].std()) if finite.any() else 1.0
+            std    = max(std, 1e-6)
+            data_3d[c][~finite] = mu
+            data_3d[c] = (data_3d[c] - mu) / std
 
-        return torch.from_numpy(data_3d.astype(np.float32))  # (13, H, W)
+        return torch.from_numpy(data_3d.astype(np.float32))
 
     def _load_env(self, path: Path):
         """
-        Load Env-Data .npy file.
-        Returns (env_vec, y_intensity, y_direction).
+        Load Env-Data .npy → (env_vec [94], y_intensity, y_direction).
 
-        Actual TCND .npy fields (confirmed by disk inspection of real .npy files):
-          month                 (12,) one-hot
-          area                   (6,) one-hot
-          intensity_class        (6,) one-hot
-          wind              scalar float64  (already normalised 0-1)
-          move_velocity     scalar float64  (already normalised)
-          location_long         (36,) one-hot
-          location_lat          (12,) one-hot
-          history_direction12    (8,) one-hot   ← NOT a scalar
-          history_direction24    (8,) one-hot   ← NOT a scalar
-          history_inte_change24  (4,) one-hot   ← NOT a scalar
-          future_direction24   scalar int64  ← label  (−1 = unknown)
-          future_inte_change24 scalar int64  ← label  (−1 = unknown)
-
-        Assembled order (must match EnvEncoder slices in backbone.py):
-          [0:12]   month
-          [12:18]  area
-          [18:24]  intensity_class
-          [24:25]  wind
-          [25:26]  move_velocity
-          [26:62]  location_long
-          [62:74]  location_lat
-          [74:82]  history_direction12
-          [82:90]  history_direction24
-          [90:94]  history_inte_change24
-          Total = 94 dims
+        The CRITICAL fix here: history_direction12, history_direction24, and
+        history_inte_change24 are stored in the files as SCALAR INTEGER CLASS
+        INDICES (confirmed from real data), NOT as one-hot arrays.  They must
+        be converted to one-hot with class_to_ohe().  Using the generic ohe()
+        helper on a scalar produces the raw integer as the first element
+        (e.g. value=4 → [4.,0.,0.,0.,0.,0.,0.,0.]) which is INCORRECT.
         """
         d = np.load(path, allow_pickle=True).item()
 
+        # ── Helper A: existing one-hot / multi-hot arrays ─────────────────────
         def ohe(val, length):
-            """Get a one-hot/multi-hot array of fixed length as float32."""
             if val is None:
                 return np.zeros(length, dtype=np.float32)
             arr = np.asarray(val, dtype=np.float32).ravel()
@@ -582,35 +463,54 @@ class TCNDDataset(Dataset):
                 arr = np.pad(arr, (0, length - arr.size))
             return arr[:length].astype(np.float32)
 
+        # ── Helper B: scalar integer class index → proper one-hot ─────────────
+        def class_to_ohe(val, length):
+            """
+            val: scalar integer class index (0-based), or -1 / None for unknown.
+            Returns a float32 one-hot vector of `length` dims.
+            Unknown / out-of-range → zero vector.
+            """
+            if val is None:
+                return np.zeros(length, dtype=np.float32)
+            idx = int(np.asarray(val).ravel()[0])
+            if idx < 0 or idx >= length:
+                return np.zeros(length, dtype=np.float32)   # -1 or invalid → unknown
+            out      = np.zeros(length, dtype=np.float32)
+            out[idx] = 1.0
+            return out
+
+        # ── Helper C: scalar → float32 length-1 array ─────────────────────────
         def scalar_f32(val, default=0.0):
-            """Scalar (or 0-d array) → float32 length-1 array."""
             if val is None:
                 return np.array([default], dtype=np.float32)
             v = np.asarray(val, dtype=np.float32).ravel()
             return v[:1] if v.size >= 1 else np.array([default], dtype=np.float32)
 
+        # ── Build 94-dim feature vector ───────────────────────────────────────
         parts = [
-            ohe(d.get("month"),              12),   # [0:12]
-            ohe(d.get("area"),                6),   # [12:18]
-            ohe(d.get("intensity_class"),     6),   # [18:24]
-            scalar_f32(d.get("wind")),               # [24:25]  already normalised
-            scalar_f32(d.get("move_velocity")),      # [25:26]  already normalised
-            ohe(d.get("location_long"),      36),   # [26:62]
-            ohe(d.get("location_lat"),       12),   # [62:74]
-            ohe(d.get("history_direction12"),  8),  # [74:82]  one-hot, not scalar
-            ohe(d.get("history_direction24"),  8),  # [82:90]  one-hot, not scalar
-            ohe(d.get("history_inte_change24"), 4), # [90:94]  one-hot, not scalar
+            ohe(d.get("month"),                   12),  # [0:12]   one-hot array
+            ohe(d.get("area"),                     6),  # [12:18]  one-hot array
+            ohe(d.get("intensity_class"),          6),  # [18:24]  one-hot array
+            scalar_f32(d.get("wind")),                  # [24:25]  scalar float
+            scalar_f32(d.get("move_velocity")),         # [25:26]  scalar int → float
+            ohe(d.get("location_long"),           36),  # [26:62]  one-hot array
+            ohe(d.get("location_lat"),            12),  # [62:74]  one-hot array
+            # ── SCALAR INTEGER CLASS INDICES — must use class_to_ohe ──────────
+            class_to_ohe(d.get("history_direction12"),   8),   # [74:82]
+            class_to_ohe(d.get("history_direction24"),   8),   # [82:90]
+            class_to_ohe(d.get("history_inte_change24"), 4),   # [90:94]
         ]
         env_vec = torch.from_numpy(np.concatenate(parts).astype(np.float32))  # (94,)
 
-        # Labels (−1 → clamp to neutral class)
+        # ── Labels ────────────────────────────────────────────────────────────
         y_intensity = int(np.asarray(d.get("future_inte_change24", 2)).ravel()[0])
         y_direction = int(np.asarray(d.get("future_direction24",   0)).ravel()[0])
 
-        if y_intensity < 0: y_intensity = 2   # -1 sentinel → already filtered at index time
+        # -1 should be filtered during index build; clamp defensively
+        if y_intensity < 0: y_intensity = 2
         if y_direction < 0: y_direction = 0
-        y_intensity = min(y_intensity, 3)      # cap at class 3 (4-class schema)
-        y_direction = min(y_direction, 7)
+        y_intensity = min(y_intensity, 3)   # 4-class (0–3)
+        y_direction = min(y_direction, 7)   # 8-class (0–7)
 
         return env_vec, y_intensity, y_direction
 
@@ -619,91 +519,53 @@ class TCNDDataset(Dataset):
     ) -> torch.Tensor:
         """
         8-dim physics feature vector for PhysIRM invariant sub-space.
-          [0] SST anomaly vs basin climatology (basin-level constant; 28°C reference)
-          [1] Wind shear proxy: negative spatial cross-correlation of U_200 and U_850
-              (cross-channel Pearson correlation is invariant to per-sample z-scoring)
-          [2] Coriolis parameter (normalised, per-sample from LAT_norm)
-          [3] MPI proxy (basin SST - 26°C threshold, basin-level)
-          [4] Boundary-layer dynamics proxy (WND_norm from Data_1d)
-          [5] Outflow proxy: spatial skewness of Z_200 (channel 8)
-          [6] Steering proxy: spatial skewness of Z_500 (channel 9)
-          [7] Current intensity (WND_norm, as-is from Data_1d)
-
-        NOTE on normalization: Data_3d channels are per-sample z-scored in _load_3d,
-        so their spatial means are ~0 and spatial variances are ~1 by construction.
-        Attempting to recover absolute physical units via the global NORM constants
-        is incorrect (produces values near the normalisation mean for every sample).
-        We instead use:
-          - Basin-level climatological constants (BASIN_SST_STATS) for SST / MPI.
-          - Cross-channel Pearson correlation for wind shear (invariant to z-scoring).
-          - Spatial skewness for outflow / steering (also invariant to z-scoring).
-          - Data_1d features (WND_norm, LAT_norm) for intensity and Coriolis.
+          [0] SST anomaly vs 28°C global reference (basin-level constant)
+          [1] Wind shear proxy: –cross-correlation(U_200, U_850)
+          [2] Coriolis parameter (from LAT_norm)
+          [3] MPI proxy (basin SST – 26°C threshold)
+          [4] Boundary-layer proxy (WND_norm)
+          [5] Outflow proxy (spatial skewness of Z_200)
+          [6] Steering proxy (spatial skewness of Z_500)
+          [7] Current intensity (WND_norm)
         """
         wnd_norm  = float(row.get("WND_norm", 0.0))
         sst_stats = BASIN_SST_STATS.get(basin, {"mean": 28.0, "std": 2.0})
 
-        # [0] SST anomaly: basin climatological mean vs. global tropical reference (28°C)
         sst_anom = float(np.clip(
             (sst_stats["mean"] - 28.0) / max(sst_stats["std"], 1e-6), -3.0, 3.0
         ))
 
-        # [1] Wind shear proxy: negative spatial cross-correlation between U_200 and U_850.
-        # After per-sample z-scoring, each channel has zero mean.  Pearson correlation
-        # between two channels is invariant to individual z-scoring and captures opposing
-        # wind patterns.  Negated so that high shear → large positive feature value.
         if data_3d.shape[0] >= 13:
-            u200  = data_3d[0].float().flatten()   # channel 0 = U at 200 hPa
-            u850  = data_3d[2].float().flatten()   # channel 2 = U at 850 hPa
-            denom = (u200.std() * u850.std()).clamp(min=1e-6)
-            corr  = float((u200 * u850).mean() / denom)
+            u200  = data_3d[0].float().flatten()
+            u850  = data_3d[2].float().flatten()
+            corr  = float((u200 * u850).mean() / (u200.std() * u850.std()).clamp(1e-6))
             shear = float(np.clip(-corr, -1.0, 1.0))
         else:
             shear = 0.0
 
-        # [2] Coriolis parameter per time step using un-normalized latitude.
-        # TCND LAT_norm = (LAT_raw + 90.0) / 180.0  →  LAT_raw = LAT_norm * 180 - 90
-        lat_norm      = float(row.get("LAT_norm", 0.0))
-        lat_deg       = lat_norm * 180.0 - 90.0
-        omega         = 7.2921e-5
-        coriolis_raw  = 2 * omega * np.sin(np.deg2rad(lat_deg))
-        coriolis_norm = float(np.clip(coriolis_raw / 1.4584e-4, -1.0, 1.0))
+        lat_deg      = float(row.get("LAT_norm", 0.0)) * 180.0 - 90.0
+        coriolis_norm = float(np.clip(
+            2 * 7.2921e-5 * np.sin(np.deg2rad(lat_deg)) / 1.4584e-4, -1.0, 1.0
+        ))
 
-        # [3] MPI proxy: basin SST vs 26°C intensification threshold (basin-level)
         mpi_proxy = float(np.clip((sst_stats["mean"] - 26.0) / 10.0, -1.0, 1.0))
+        bl_proxy  = float(np.clip(wnd_norm, 0.0, 1.0))
 
-        # [4] Boundary-layer dynamics proxy: current wind intensity (Data_1d, not z-scored)
-        bl_proxy = float(np.clip(wnd_norm, 0.0, 1.0))
-
-        # [5] Outflow proxy: spatial skewness of Z_200 (channel 8).
-        # Skewness is invariant to zero-mean / unit-variance z-scoring and captures
-        # asymmetric upper-tropospheric outflow structure.
         if data_3d.shape[0] >= 13:
-            z200    = data_3d[8].float()
-            outflow = float((
-                (z200 - z200.mean()).pow(3).mean()
-                / z200.std().clamp(min=1e-6).pow(3)
-            ).clamp(-3.0, 3.0))
+            def skewness(t):
+                return float(
+                    ((t - t.mean()).pow(3).mean() / t.std().clamp(1e-6).pow(3)).clamp(-3.0, 3.0)
+                )
+            outflow  = skewness(data_3d[8].float())   # Z_200 channel
+            steering = skewness(data_3d[9].float())   # Z_500 channel
         else:
-            outflow = 0.0
+            outflow = steering = 0.0
 
-        # [6] Steering proxy: spatial skewness of Z_500 (channel 9)
-        if data_3d.shape[0] >= 13:
-            z500     = data_3d[9].float()
-            steering = float((
-                (z500 - z500.mean()).pow(3).mean()
-                / z500.std().clamp(min=1e-6).pow(3)
-            ).clamp(-3.0, 3.0))
-        else:
-            steering = 0.0
-
-        # [7] Current intensity (normalised wind speed from Data_1d)
         return torch.tensor(
             [sst_anom, shear, coriolis_norm, mpi_proxy,
              bl_proxy, outflow, steering, wnd_norm],
             dtype=torch.float32,
         )
-
-
 
 
 # ── DataLoader factory ────────────────────────────────────────────────────────
@@ -721,32 +583,33 @@ def make_dataloader(
     cache: bool = False,
     **kwargs,
 ) -> DataLoader:
-    # If caching, we MUST disable multiprocessing to allow the main thread 
-    # to maintain a single memory space. Otherwise, 8 workers = 8 isolated caches.
     if cache:
         num_workers = 0
-        
     ds = TCNDDataset(
         root=root, basins=basins, split=split,
         use_3d=use_3d, use_env=use_env, seed=seed,
-        disable_tqdm=disable_tqdm, cache=cache, **kwargs
+        disable_tqdm=disable_tqdm, cache=cache, **kwargs,
     )
     if len(ds) == 0:
         raise RuntimeError(
-            "Dataset is empty for basins=" + str(basins) + ", split=" + repr(split) + ".\n"
-            "Check --data_root contains CSV files under Data_1d/<BASIN>/."
+            f"Empty dataset: basins={basins}, split={split!r}. "
+            "Check --data_root has .txt files under Data1D/<BASIN>/<split>/."
         )
     shuffle   = (split == "train")
-    # Only drop_last when we have strictly more than one batch of data
     drop_last = (split == "train") and (len(ds) > batch_size)
-    # Cap batch_size to dataset size to avoid sampler errors on tiny splits
     safe_bs   = min(batch_size, len(ds))
+    # pin_memory_device pins directly to the active CUDA device, reducing
+    # host→device transfer latency vs. the generic pin_memory=True path.
+    cuda_avail = torch.cuda.is_available()
+    pin_kwargs: Dict[str, Any] = {"pin_memory": True}
+    if cuda_avail:
+        pin_kwargs["pin_memory_device"] = "cuda"
     return DataLoader(
         ds, batch_size=safe_bs, shuffle=shuffle,
-        num_workers=num_workers, pin_memory=torch.cuda.is_available(),
-        drop_last=drop_last,
+        num_workers=num_workers, drop_last=drop_last,
         persistent_workers=(num_workers > 0),
-        prefetch_factor=2 if num_workers > 0 else None,
+        prefetch_factor=4 if num_workers > 0 else None,
+        **pin_kwargs,
     )
 
 
@@ -760,8 +623,11 @@ def make_per_basin_loaders(
     cache: bool = False,
     **kwargs,
 ) -> Dict[str, DataLoader]:
-    """Return one DataLoader per basin (used for per-environment IRM updates)."""
+    """One DataLoader per basin (for per-environment IRM/CORAL/VREx updates)."""
     return {
-        b: make_dataloader(root, [b], split, batch_size, num_workers, disable_tqdm=disable_tqdm, cache=cache, **kwargs)
+        b: make_dataloader(
+            root, [b], split, batch_size, num_workers,
+            disable_tqdm=disable_tqdm, cache=cache, **kwargs,
+        )
         for b in basins
     }

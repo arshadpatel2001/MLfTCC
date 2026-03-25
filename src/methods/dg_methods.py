@@ -39,21 +39,69 @@ from torch.autograd import grad
 
 # ── Loss utilities ────────────────────────────────────────────────────────────
 
-def task_loss(logits_int: torch.Tensor, logits_dir: torch.Tensor,
-              y_int: torch.Tensor, y_dir: torch.Tensor,
-              int_weight: float = 1.0, dir_weight: float = 0.5) -> torch.Tensor:
-    """Weighted cross-entropy over intensity + direction tasks."""
+def task_loss(
+    logits_int: torch.Tensor,
+    logits_dir: torch.Tensor,
+    y_int:      torch.Tensor,
+    y_dir:      torch.Tensor,
+    int_weight: float = 1.0,
+    dir_weight: float = 0.5,
+    # Intensity regression (optional — ignored when None or reg_weight == 0)
+    pred_reg:   Optional[torch.Tensor] = None,   # (B, 2): [wind_norm, pres_norm]
+    y_wind_reg: Optional[torch.Tensor] = None,   # (B,) scalar targets, may contain NaN
+    y_pres_reg: Optional[torch.Tensor] = None,   # (B,) scalar targets, may contain NaN
+    reg_weight: float = 0.5,
+) -> torch.Tensor:
+    """
+    Combined task loss:
+      L = int_weight * CE(intensity_cls) + dir_weight * CE(direction_cls)
+        + reg_weight * MSE(wind_reg, pres_reg)   [only when targets available]
+
+    Regression targets may contain NaN values for end-of-storm samples where
+    the 24h-ahead timestep does not exist.  These samples are masked out so
+    they do not contribute gradients to the regression head.
+
+    The IRM/PhysIRM gradient penalty is computed on the *classification* logits
+    only (not regression), so the penalty function in each method does NOT call
+    this full task_loss — it calls the classification-only version directly.
+    """
     l_int = F.cross_entropy(logits_int, y_int)
     l_dir = F.cross_entropy(logits_dir, y_dir)
-    return int_weight * l_int + dir_weight * l_dir
+    loss  = int_weight * l_int + dir_weight * l_dir
+
+    # ── Regression term ───────────────────────────────────────────────────────
+    if (pred_reg is not None
+            and y_wind_reg is not None
+            and y_pres_reg is not None
+            and reg_weight > 0.0):
+        # Stack targets → (B, 2), build NaN mask
+        y_reg  = torch.stack([y_wind_reg, y_pres_reg], dim=-1)  # (B, 2)
+        mask   = torch.isfinite(y_reg).all(dim=-1)               # (B,)
+        if mask.sum() > 0:
+            l_reg = F.mse_loss(pred_reg[mask], y_reg[mask])
+            loss  = loss + reg_weight * l_reg
+
+    return loss
 
 
-def per_env_loss(model: nn.Module, batch: dict, **kwargs) -> torch.Tensor:
+def per_env_loss(
+    model:      nn.Module,
+    batch:      dict,
+    reg_weight: float = 0.5,
+    **kwargs,
+) -> torch.Tensor:
     """Compute task loss on a single environment (basin) batch."""
     out = model(batch)
     return task_loss(
-        out["logits_intensity"], out["logits_direction"],
-        batch["y_intensity"], batch["y_direction"], **kwargs
+        out["logits_intensity"],
+        out["logits_direction"],
+        batch["y_intensity"],
+        batch["y_direction"],
+        pred_reg   = out.get("pred_intensity_reg"),
+        y_wind_reg = batch.get("y_wind_reg"),
+        y_pres_reg = batch.get("y_pres_reg"),
+        reg_weight = reg_weight,
+        **kwargs,
     )
 
 
@@ -113,10 +161,13 @@ class ERM(DGMethod):
     Lopez-Paz, DomainBed, ICLR 2021). Always include this.
     """
 
+    def __init__(self, reg_weight: float = 0.5):
+        self.reg_weight = reg_weight
+
     def compute_loss(self, batches: Dict[str, dict], model: nn.Module):
         losses = []
         for basin, batch in batches.items():
-            losses.append(per_env_loss(model, batch))
+            losses.append(per_env_loss(model, batch, reg_weight=self.reg_weight))
         total = torch.stack(losses).mean()
         return total, {"erm_loss": total.item()}
 
@@ -134,25 +185,34 @@ class IRM(DGMethod):
 
     Penalty:
         Ω(f) = Σ_e ||∇_{w|w=1} R^e(w·f)||²
+
+    NOTE: The IRM gradient penalty is applied to the *classification* logits only.
+    The regression head is part of the ERM loss but not the invariance penalty,
+    since regression is a continuous output that does not lend itself naturally
+    to the dummy-scalar-classifier formulation.
     """
 
-    def __init__(self, irm_lambda: float = 1.0, warmup_steps: int = 500):
+    def __init__(self, irm_lambda: float = 1.0, warmup_steps: int = 500,
+                 reg_weight: float = 0.5):
         """
         Args:
             irm_lambda:    Weight on the IRM penalty (λ in the paper).
                            Anneal from 0 → irm_lambda over warmup_steps.
             warmup_steps:  Steps before IRM penalty reaches full strength.
+            reg_weight:    Weight on the intensity regression MSE loss.
         """
         self.irm_lambda    = irm_lambda
         self.warmup_steps  = warmup_steps
         self._step         = 0
+        self.reg_weight    = reg_weight
 
     def _penalty(self, logits_int, logits_dir, y_int, y_dir) -> torch.Tensor:
-        """Compute IRM penalty for one environment."""
-        # Scalar w = 1 (dummy classifier variable)
+        """Compute IRM penalty for one environment (classification logits only)."""
         w = torch.ones(1, requires_grad=True, device=logits_int.device)
-        loss = task_loss(logits_int * w, logits_dir * w, y_int, y_dir)
-        g = grad(loss, w, create_graph=True)[0]
+        # Classification loss only — regression is excluded from the IRM penalty
+        l_cls = (1.0 * F.cross_entropy(logits_int * w, y_int)
+                 + 0.5 * F.cross_entropy(logits_dir * w, y_dir))
+        g = grad(l_cls, w, create_graph=True)[0]
         return g.pow(2).sum()
 
     def compute_loss(self, batches: Dict[str, dict], model: nn.Module):
@@ -163,8 +223,14 @@ class IRM(DGMethod):
         for basin, batch in batches.items():
             out = model(batch)
             erm_losses.append(
-                task_loss(out["logits_intensity"], out["logits_direction"],
-                          batch["y_intensity"], batch["y_direction"])
+                task_loss(
+                    out["logits_intensity"], out["logits_direction"],
+                    batch["y_intensity"],    batch["y_direction"],
+                    pred_reg   = out.get("pred_intensity_reg"),
+                    y_wind_reg = batch.get("y_wind_reg"),
+                    y_pres_reg = batch.get("y_pres_reg"),
+                    reg_weight = self.reg_weight,
+                )
             )
             irm_penalties.append(
                 self._penalty(out["logits_intensity"], out["logits_direction"],
@@ -194,10 +260,12 @@ class VREx(DGMethod):
     More numerically stable than IRM in practice (no second-order gradients).
     """
 
-    def __init__(self, beta: float = 1.0, warmup_steps: int = 500):
+    def __init__(self, beta: float = 1.0, warmup_steps: int = 500,
+                 reg_weight: float = 0.5):
         self.beta          = beta
         self.warmup_steps  = warmup_steps
         self._step         = 0
+        self.reg_weight    = reg_weight
 
     def compute_loss(self, batches: Dict[str, dict], model: nn.Module):
         self._step += 1
@@ -205,7 +273,7 @@ class VREx(DGMethod):
 
         losses = []
         for basin, batch in batches.items():
-            losses.append(per_env_loss(model, batch))
+            losses.append(per_env_loss(model, batch, reg_weight=self.reg_weight))
 
         losses_t = torch.stack(losses)
         erm  = losses_t.mean()
@@ -234,15 +302,15 @@ class CORAL(DGMethod):
         Ω = Σ_{e1≠e2} ||Cov(f(X^{e1})) - Cov(f(X^{e2}))||_F²
     """
 
-    def __init__(self, coral_lambda: float = 1.0):
+    def __init__(self, coral_lambda: float = 1.0, reg_weight: float = 0.5):
         self.coral_lambda = coral_lambda
+        self.reg_weight   = reg_weight
 
     @staticmethod
     def _cov(z: torch.Tensor) -> torch.Tensor:
-        """Compute covariance matrix of (B, D) feature matrix."""
-        n, d = z.shape
-        z = z - z.mean(dim=0, keepdim=True)
-        return (z.T @ z) / (max(n - 1, 1) + 1e-8)
+        """Covariance matrix of (B, D) via torch.cov (uses cuBLAS GEMM on GPU)."""
+        # torch.cov expects features as rows, samples as cols: transpose to (D, B)
+        return torch.cov(z.T)
 
     def compute_loss(self, batches: Dict[str, dict], model: nn.Module):
         envs  = list(batches.keys())
@@ -252,8 +320,14 @@ class CORAL(DGMethod):
             batch = batches[basin]
             out   = model(batch)
             losses.append(
-                task_loss(out["logits_intensity"], out["logits_direction"],
-                          batch["y_intensity"], batch["y_direction"])
+                task_loss(
+                    out["logits_intensity"], out["logits_direction"],
+                    batch["y_intensity"],    batch["y_direction"],
+                    pred_reg   = out.get("pred_intensity_reg"),
+                    y_wind_reg = batch.get("y_wind_reg"),
+                    y_pres_reg = batch.get("y_pres_reg"),
+                    reg_weight = self.reg_weight,
+                )
             )
             reprs.append(out["z"])  # (B, D)
 
@@ -328,11 +402,13 @@ class DANN(DGMethod, nn.Module):
         n_domains: int = 6,
         dann_lambda: float = 1.0,
         total_steps: int = 10000,
+        reg_weight: float = 0.5,
     ):
         nn.Module.__init__(self)
         self.dann_lambda  = dann_lambda
         self.total_steps  = total_steps
         self._step        = 0
+        self.reg_weight   = reg_weight
         self.discriminator = DomainDiscriminator(feature_dim, n_domains)
 
     # to() and parameters() are inherited from nn.Module;
@@ -351,8 +427,14 @@ class DANN(DGMethod, nn.Module):
         for basin, batch in batches.items():
             out = model(batch)
             task_losses.append(
-                task_loss(out["logits_intensity"], out["logits_direction"],
-                          batch["y_intensity"], batch["y_direction"])
+                task_loss(
+                    out["logits_intensity"], out["logits_direction"],
+                    batch["y_intensity"],    batch["y_direction"],
+                    pred_reg   = out.get("pred_intensity_reg"),
+                    y_wind_reg = batch.get("y_wind_reg"),
+                    y_pres_reg = batch.get("y_pres_reg"),
+                    reg_weight = self.reg_weight,
+                )
             )
             domain_logits = self.discriminator(out["z"], alpha)
             basin_labels  = batch["basin_idx"]  # (B,)
@@ -416,10 +498,12 @@ class MAML(DGMethod):
         inner_lr: float   = 1e-3,
         inner_steps: int  = 5,
         first_order: bool = True,
+        reg_weight: float = 0.5,
     ):
         self.inner_lr    = inner_lr
         self.inner_steps = inner_steps
         self.first_order = first_order
+        self.reg_weight  = reg_weight
 
     def _inner_loop(
         self, model: nn.Module, support_batch: dict
@@ -432,13 +516,18 @@ class MAML(DGMethod):
         fast_weights = {n: p.clone() for n, p in model.named_parameters()}
         fast_buffers = {n: b.clone() for n, b in model.named_buffers()}
 
-        inner_start = time.time()
         for _ in range(self.inner_steps):
             params_and_buffers = {**fast_weights, **fast_buffers}
             # Forward with fast weights and buffers
             out  = self._forward_with_weights(model, support_batch, params_and_buffers)
-            loss = task_loss(out["logits_intensity"], out["logits_direction"],
-                             support_batch["y_intensity"], support_batch["y_direction"])
+            loss = task_loss(
+                out["logits_intensity"], out["logits_direction"],
+                support_batch["y_intensity"], support_batch["y_direction"],
+                pred_reg   = out.get("pred_intensity_reg"),
+                y_wind_reg = support_batch.get("y_wind_reg"),
+                y_pres_reg = support_batch.get("y_pres_reg"),
+                reg_weight = self.reg_weight,
+            )
             grads = torch.autograd.grad(loss, fast_weights.values(),
                                         create_graph=not self.first_order,
                                         allow_unused=True)
@@ -446,9 +535,6 @@ class MAML(DGMethod):
                 n: p - self.inner_lr * (g if g is not None else torch.zeros_like(p))
                 for (n, p), g in zip(fast_weights.items(), grads)
             }
-            
-        import logging
-        logging.getLogger(__name__).debug(f"MAML inner loop took {time.time() - inner_start:.4f}s")
 
         return {**fast_weights, **fast_buffers}
 
@@ -489,8 +575,14 @@ class MAML(DGMethod):
             fast_w = self._inner_loop(model, support)
             # Query loss with adapted weights
             out_q  = self._forward_with_weights(model, query, fast_w)
-            loss_q = task_loss(out_q["logits_intensity"], out_q["logits_direction"],
-                               query["y_intensity"], query["y_direction"])
+            loss_q = task_loss(
+                out_q["logits_intensity"], out_q["logits_direction"],
+                query["y_intensity"], query["y_direction"],
+                pred_reg   = out_q.get("pred_intensity_reg"),
+                y_wind_reg = query.get("y_wind_reg"),
+                y_pres_reg = query.get("y_pres_reg"),
+                reg_weight = self.reg_weight,
+            )
             meta_losses.append(loss_q)
 
         if not meta_losses:
@@ -520,8 +612,8 @@ class PhysIRM(DGMethod, nn.Module):
          monsoon trough, ITCZ). Allowed to shift across basins (no IRM penalty).
 
     Total loss:
-        L = ERM(z_phys ⊕ z_env)
-          + λ_irm  · Σ_e ||∇_w R^e(w·z_phys)||²    [IRM on physics space]
+        L = ERM(z_phys ⊕ z_env)                                [cls + reg]
+          + λ_irm  · Σ_e ||∇_w R^e(w·z_phys)||²    [IRM on physics space, cls only]
           + λ_orth · ||z_phys^T z_env||_F²            [orthogonality regulariser]
           + λ_phys · L_phys(z_phys, phys_features)    [physics grounding loss]
 
@@ -555,6 +647,7 @@ class PhysIRM(DGMethod, nn.Module):
         phys_dim:      int   = 64,     # dimension of z_phys sub-space
         warmup_steps:  int   = 500,    # ramp IRM penalty from 0 → irm_lambda
         n_phys_feat:   int   = 8,      # number of input physics features
+        reg_weight:    float = 0.5,    # weight on intensity regression MSE loss
     ):
         nn.Module.__init__(self)
         self.irm_lambda   = irm_lambda
@@ -563,6 +656,7 @@ class PhysIRM(DGMethod, nn.Module):
         self.phys_dim     = phys_dim
         self.warmup_steps = warmup_steps
         self._step        = 0
+        self.reg_weight   = reg_weight
 
         # Physics predictor: maps z_phys → raw physics features
         # Trained jointly to ground z_phys in physical meaning
@@ -578,10 +672,15 @@ class PhysIRM(DGMethod, nn.Module):
     def _irm_penalty_phys(
         self, logits_int, logits_dir, y_int, y_dir
     ) -> torch.Tensor:
-        """IRM gradient penalty applied only on physics sub-space logits."""
+        """
+        IRM gradient penalty applied only on physics sub-space logits.
+        Uses classification logits only (not regression), consistent with
+        the dummy-scalar-classifier formulation of IRM.
+        """
         w = torch.ones(1, requires_grad=True, device=logits_int.device)
-        loss = task_loss(logits_int * w, logits_dir * w, y_int, y_dir)
-        g = grad(loss, w, create_graph=True)[0]
+        l_cls = (1.0 * F.cross_entropy(logits_int * w, y_int)
+                 + 0.5 * F.cross_entropy(logits_dir * w, y_dir))
+        g = grad(l_cls, w, create_graph=True)[0]
         return g.pow(2).sum()
 
     def _orthogonality_loss(
@@ -619,18 +718,24 @@ class PhysIRM(DGMethod, nn.Module):
             z_phys_raw = out["z_phys_raw"]  # (B, phys_dim)
             z_env      = out["z_env"]       # (B, env_dim)
 
-            # ── ERM loss (on full representation) ─────────────────────────
+            # ── ERM loss (classification + regression on full representation) ─
             erm_losses.append(
-                task_loss(out["logits_intensity"], out["logits_direction"],
-                          batch["y_intensity"], batch["y_direction"])
+                task_loss(
+                    out["logits_intensity"], out["logits_direction"],
+                    batch["y_intensity"],    batch["y_direction"],
+                    pred_reg   = out.get("pred_intensity_reg"),
+                    y_wind_reg = batch.get("y_wind_reg"),
+                    y_pres_reg = batch.get("y_pres_reg"),
+                    reg_weight = self.reg_weight,
+                )
             )
 
-            # ── IRM penalty on physics sub-space only ──────────────────────
+            # ── IRM penalty on physics sub-space only (classification) ────────
             # We apply IRM on the classification logits derived ONLY from z_phys.
             # This ensures that the IRM penalty (and its gradients) only affects
             # the physics sub-space and the backbone, without leaking into z_env.
             z_phys_only = torch.cat([torch.zeros_like(z_env), z_phys], dim=-1)
-            logits_phys_int, logits_phys_dir = model.heads(z_phys_only)
+            logits_phys_int, logits_phys_dir, _ = model.heads(z_phys_only)
 
             irm_pens.append(
                 self._irm_penalty_phys(
