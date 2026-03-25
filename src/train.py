@@ -294,8 +294,31 @@ def _train_one_experiment_inner(
     # ── Training loop ─────────────────────────────────────────────────────────
     best_val_f1 = -1.0
     best_ckpt   = None
-    step        = 0
+    start_epoch = 1
     history     = []
+    step        = 0
+
+    # ── Resume logic ──────────────────────────────────────────────────────────
+    if args.resume:
+        resume_path = Path(args.resume)
+        if args.resume.lower() == "latest" and args.output_dir:
+            resume_path = Path(args.output_dir) / f"{run_id}_latest.pt"
+        
+        if resume_path.exists():
+            log.info(f"[{run_id}] Resuming from checkpoint: {resume_path}")
+            ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt["model"])
+            if isinstance(method, torch.nn.Module) and "method" in ckpt and ckpt["method"]:
+                method.load_state_dict(ckpt["method"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            scheduler.load_state_dict(ckpt["scheduler"])
+            start_epoch = ckpt.get("epoch", 0) + 1
+            best_val_f1 = ckpt.get("best_val_f1", -1.0)
+            history     = ckpt.get("history", [])
+            step        = ckpt.get("step", 0)
+            log.info(f"[{run_id}] Resuming at epoch {start_epoch}")
+        else:
+            log.warning(f"[{run_id}] Resume path {resume_path} not found. Starting fresh.")
 
     total_train = sum(len(l.dataset) for l in train_loaders_per_env.values())
     log.info(
@@ -305,7 +328,7 @@ def _train_one_experiment_inner(
         f"Val-tgt: {len(val_loader_tgt.dataset):,}  Test-tgt: {len(test_loader_tgt.dataset):,}"
     )
     log.info(f"Started Training")
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         if isinstance(method, torch.nn.Module):
             method.train()
@@ -464,14 +487,18 @@ def _train_one_experiment_inner(
                 **epoch_metrics,
             })
 
-        # Save latest checkpoint every epoch
+        # Save latest checkpoint every epoch for resumption
         if args.output_dir:
             Path(args.output_dir).mkdir(parents=True, exist_ok=True)
             torch.save({
-                "epoch":  epoch,
-                "model":  model.state_dict(),
-                "method": method.state_dict()
-                          if isinstance(method, torch.nn.Module) else {},
+                "epoch":       epoch,
+                "model":       model.state_dict(),
+                "method":      method.state_dict() if isinstance(method, torch.nn.Module) else {},
+                "optimizer":   optimizer.state_dict(),
+                "scheduler":   scheduler.state_dict(),
+                "best_val_f1": best_val_f1,
+                "history":     history,
+                "step":        step,
             }, Path(args.output_dir) / f"{run_id}_latest.pt")
 
     # ── Final evaluation ──────────────────────────────────────────────────────
@@ -991,6 +1018,9 @@ def parse_args():
     p.add_argument("--few_shot",        action="store_true")
     p.add_argument("--k_shots",         type=int, default=32)
     p.add_argument("--few_shot_epochs", type=int, default=5)
+
+    p.add_argument("--resume", default=None,
+                   help="Path to checkpoint to resume from (or 'latest' to auto-find in output_dir)")
 
     return p.parse_args()
 
