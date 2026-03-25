@@ -210,8 +210,11 @@ def _train_one_experiment_inner(
     # ── Model ─────────────────────────────────────────────────────────────────
     model = build_model(args).to(device)
     if getattr(args, "compile", False) and hasattr(torch, "compile"):
-        log.info(f"[{run_id}] torch.compile enabled")
-        model = torch.compile(model)
+        if method_name == "maml" and device.type == "mps":
+            log.info(f"[{run_id}] Skipping torch.compile for {method_name} on {device.type} to avoid backend errors...")
+        else:
+            log.info(f"[{run_id}] torch.compile enabled")
+            model = torch.compile(model)
 
     # ── Method ────────────────────────────────────────────────────────────────
     method_kwargs = {k: v for k, v in hp.items()
