@@ -1,4 +1,4 @@
-dataset/
+data/
 src/runs/
 __pycache__/
 *.pt
