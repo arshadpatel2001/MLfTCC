@@ -354,18 +354,18 @@ class TCNDDataset(Dataset):
                     if self.use_env and not env_path:
                         continue
 
-                    # Filter out samples with unknown future labels (-1 sentinel).
-                    # These have no valid label for intensity or direction and would
-                    # introduce noise if trained on. One .npy peek, two checks.
-                    if env_path is not None:
-                        try:
-                            _d = np.load(env_path, allow_pickle=True).item()
-                            _yi = int(np.asarray(_d.get("future_inte_change24", 0)).ravel()[0])
-                            _yd = int(np.asarray(_d.get("future_direction24",   0)).ravel()[0])
-                            if _yi < 0 or _yd < 0:
-                                continue
-                        except Exception:
-                            pass  # if unreadable, keep the sample and let __getitem__ handle it
+                    # # Filter out samples with unknown future labels (-1 sentinel).
+                    # # These have no valid label for intensity or direction and would
+                    # # introduce noise if trained on. One .npy peek, two checks.
+                    # if env_path is not None:
+                    #     try:
+                    #         _d = np.load(env_path, allow_pickle=True).item()
+                    #         _yi = int(np.asarray(_d.get("future_inte_change24", 0)).ravel()[0])
+                    #         _yd = int(np.asarray(_d.get("future_direction24",   0)).ravel()[0])
+                    #         if _yi < 0 or _yd < 0:
+                    #             continue
+                    #     except Exception:
+                    #         pass  # if unreadable, keep the sample and let __getitem__ handle it
 
                     self.index.append({
                         "basin":     basin,
