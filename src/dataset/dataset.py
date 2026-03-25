@@ -351,9 +351,15 @@ class TCNDDataset(Dataset):
         GLOBAL_INDEX_CACHE[cache_key] = self.index.copy()
 
     def _get_3d_path(self, basin, year, tc_name, ts) -> Optional[Path]:
-        p = (self._tcnd_root / "Data3D" / basin / year / tc_name
-             / f"TCND_{tc_name}_{ts}_sst_z_u_v.nc")
-        return p if p.exists() else None
+        # TestData uses Data3D/basin, TrainData uses basin directly at the root
+        p1 = (self._tcnd_root / "Data3D" / basin / year / tc_name
+              / f"TCND_{tc_name}_{ts}_sst_z_u_v.nc")
+        if p1.exists():
+            return p1
+            
+        p2 = (self._tcnd_root / basin / year / tc_name
+              / f"TCND_{tc_name}_{ts}_sst_z_u_v.nc")
+        return p2 if p2.exists() else None
 
     def _get_env_path(self, basin, year, tc_name, ts) -> Optional[Path]:
         p = self._tcnd_root / "Env-Data" / basin / year / tc_name / f"{ts}.npy"

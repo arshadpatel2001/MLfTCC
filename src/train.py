@@ -721,10 +721,26 @@ def run_lobo_benchmark(args):
     method_arg = args.methods or args.method
     methods = ([m.strip() for m in method_arg.split(",")]
                if method_arg else list(METHOD_REGISTRY.keys()))
-    splits  = (LOBO_SPLITS if not args.target_basin else [
-        {"target": args.target_basin,
-         "source": [b for b in BASIN_CODES if b != args.target_basin]}
-    ])
+
+    if args.target_basin:
+        # Single target basin mode (but using LOBO benchmark flow)
+        if args.source_basins:
+            source = [s.strip() for s in args.source_basins.split(",")]
+        else:
+            source = [b for b in BASIN_CODES if b != args.target_basin]
+        splits = [{"target": args.target_basin, "source": source}]
+    else:
+        # Standard LOBO: iterate all target basins
+        if args.source_basins:
+            # If user provided fixed sources, use those sources exactly
+            # (optionally filtering out the current target)
+            user_sources = [s.strip() for s in args.source_basins.split(",")]
+            splits = [
+                {"target": t, "source": [s for s in user_sources if s != t]}
+                for t in BASIN_CODES
+            ]
+        else:
+            splits = LOBO_SPLITS
 
     all_results = []
     t_bench = time.time()
