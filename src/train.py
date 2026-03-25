@@ -71,6 +71,31 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _resolve_split(data_mode: str, logical_split: str) -> dict:
+    """
+    Return the kwargs (split + optional force_split) for a dataloader call.
+
+    test_only (default):
+        Passes the logical split name through with no force_split, so
+        SPLIT_ALIASES in TCNDDataset can fall back gracefully.  This is the
+        existing behaviour and works with TCND_test (only test/ exists) as
+        well as any dataset where a split folder is missing.
+
+    full:
+        All three split folders exist — train/, val/, test/.
+        Each logical split maps directly to its own subfolder with no fallback:
+          train → Data1D/<basin>/train/   (training data)
+          val   → Data1D/<basin>/val/     (validation / checkpoint selection)
+          test  → Data1D/<basin>/test/    (final held-out evaluation)
+        force_split is set so TCNDDataset requires the exact folder to exist
+        rather than silently falling back to another split.
+    """
+    if data_mode == "test_only":
+        return {"split": logical_split}
+    # full mode: logical split == folder name, enforced strictly
+    return {"split": logical_split, "force_split": logical_split}
+
+
 def select_device(args) -> torch.device:
     if hasattr(args, "device") and args.device and args.device != "auto":
         device = torch.device(args.device)
@@ -182,29 +207,34 @@ def _train_one_experiment_inner(
     bs = hp.get("batch_size", 64)
 
     # ── Data ──────────────────────────────────────────────────────────────────
+    data_mode = getattr(args, "data_mode", "test_only")
     train_loaders_per_env = make_per_basin_loaders(
         root=args.data_root, basins=source_basins,
-        split="train", batch_size=bs, num_workers=args.num_workers,
+        batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
+        **_resolve_split(data_mode, "train"),
     )
     val_loader_src = make_dataloader(
         root=args.data_root, basins=source_basins,
-        split="val", batch_size=bs, num_workers=args.num_workers,
+        batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
+        **_resolve_split(data_mode, "val"),
     )
     val_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
-        split="val", batch_size=bs, num_workers=args.num_workers,
+        batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
+        **_resolve_split(data_mode, "val"),
     )
     test_loader_tgt = make_dataloader(
         root=args.data_root, basins=[target_basin],
-        split="test", batch_size=bs, num_workers=args.num_workers,
+        batch_size=bs, num_workers=args.num_workers,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
+        **_resolve_split(data_mode, "test"),
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -585,11 +615,13 @@ def few_shot_finetune(
     """
     log.info(f"Few-shot fine-tuning on {target_basin} with {k_shots} shots")
     reg_weight = getattr(args, "reg_weight", 0.5)
+    data_mode  = getattr(args, "data_mode", "test_only")
 
     shot_ds = TCNDDataset(
-        root=args.data_root, basins=[target_basin], split="train",
+        root=args.data_root, basins=[target_basin],
         use_3d=not args.no_3d, use_env=not args.no_env,
         cache=getattr(args, "cache_data", False),
+        **_resolve_split(data_mode, "train"),
     )
     k_shots = min(k_shots, len(shot_ds))
 
@@ -662,9 +694,10 @@ def few_shot_finetune(
     # Evaluate on target test split
     test_loader = make_dataloader(
         root=args.data_root, basins=[target_basin],
-        split="test", batch_size=64, num_workers=0,
+        batch_size=64, num_workers=0,
         use_3d=not args.no_3d, use_env=not args.no_env,
         disable_tqdm=args.no_tqdm, cache=getattr(args, "cache_data", False),
+        **_resolve_split(data_mode, "test"),
     )
     ev = BasinEvaluator(target_basin)
     model.eval()
@@ -896,7 +929,16 @@ def parse_args():
     p.add_argument("--data_root",   required=True,
                    help="Path to TCND root (contains Data1D/, Data3D/, Env-Data/)")
     p.add_argument("--output_dir",  default="./runs")
-    p.add_argument("--num_workers", type=int, default=12)
+    p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--data_mode", choices=["test_only", "full"], default="test_only",
+                   help=(
+                       "Data strategy:\n"
+                       "  test_only (default) — use the test/ subfolder for all splits\n"
+                       "    (SPLIT_ALIASES fallback active; works with TCND_test).\n"
+                       "  full — use all three split folders from the full dataset:\n"
+                       "    train/ → training,  val/ → checkpoint selection,  test/ → evaluation.\n"
+                       "    Requires Data1D/<basin>/train/, val/, and test/ to all exist."
+                   ))
 
     # Experiment mode
     p.add_argument("--mode", choices=["lobo", "single", "incremental"],

@@ -138,10 +138,19 @@ class TCNDDataset(Dataset):
         use_env: bool      = True,
         cache: bool        = False,
         disable_tqdm: bool = False,
+        force_split: Optional[str] = None,
     ):
+        """
+        force_split: when set, bypass SPLIT_ALIASES and require the exact
+        subfolder to exist under Data1D/<basin>/.  Use this for full-dataset
+        training (--data_mode full) so that train/ and test/ are used strictly
+        rather than falling back to each other.  Leave as None (default) for the
+        existing test_only behaviour where SPLIT_ALIASES handles missing folders.
+        """
         self.root         = Path(root)
         self.basins       = basins
         self.split        = split
+        self.force_split  = force_split
         self.use_3d       = use_3d
         self.use_env      = use_env
         self.cache        = cache
@@ -188,7 +197,8 @@ class TCNDDataset(Dataset):
 
         cache_key = (
             f"{self.root}_{'-'.join(sorted(self.basins))}_"
-            f"{self.split}_{self.use_3d}_{self.use_env}"
+            f"{self.split}_{self.use_3d}_{self.use_env}_"
+            f"fs{self.force_split or 'none'}"
         )
         if cache_key in GLOBAL_INDEX_CACHE:
             self.index = GLOBAL_INDEX_CACHE[cache_key].copy()
@@ -217,16 +227,29 @@ class TCNDDataset(Dataset):
                     f"Available: {[d.name for d in (self._tcnd_root/'Data1D').iterdir() if d.is_dir()]}"
                 )
 
-            split_folder = next(
-                (c for c in SPLIT_ALIASES[self.split] if (parent / c).exists()),
-                None,
-            )
-            if split_folder is None:
-                raise FileNotFoundError(
-                    f"No split folder (train/val/test) under {parent}"
+            if self.force_split is not None:
+                # Strict mode: exact folder required, no fallback.
+                # Used by --data_mode full to keep train/ and test/ separate.
+                split_folder = self.force_split
+                if not (parent / split_folder).exists():
+                    raise FileNotFoundError(
+                        f"force_split='{split_folder}' requested but "
+                        f"'{parent / split_folder}' does not exist. "
+                        f"Available: {[d.name for d in parent.iterdir() if d.is_dir()]}"
+                    )
+            else:
+                # Default: try aliases in order, fall back gracefully.
+                # This is the test_only / TCND_test behaviour.
+                split_folder = next(
+                    (c for c in SPLIT_ALIASES[self.split] if (parent / c).exists()),
+                    None,
                 )
-            if split_folder != self.split:
-                log.warning(f"'{self.split}' missing for {basin}; using '{split_folder}'")
+                if split_folder is None:
+                    raise FileNotFoundError(
+                        f"No split folder (train/val/test) under {parent}"
+                    )
+                if split_folder != self.split:
+                    log.warning(f"'{self.split}' missing for {basin}; using '{split_folder}'")
 
             basin_dir = parent / split_folder
             txt_files = sorted(basin_dir.glob("*.txt"))
@@ -627,6 +650,7 @@ def make_dataloader(
     seed: int = 42,
     disable_tqdm: bool = False,
     cache: bool = False,
+    force_split: Optional[str] = None,
     **kwargs,
 ) -> DataLoader:
     # Disable multiprocessing only for train when caching — forked workers
@@ -637,7 +661,8 @@ def make_dataloader(
     ds = TCNDDataset(
         root=root, basins=basins, split=split,
         use_3d=use_3d, use_env=use_env, seed=seed,
-        disable_tqdm=disable_tqdm, cache=cache, **kwargs,
+        disable_tqdm=disable_tqdm, cache=cache,
+        force_split=force_split, **kwargs,
     )
     if len(ds) == 0:
         raise RuntimeError(
@@ -669,13 +694,15 @@ def make_per_basin_loaders(
     num_workers: int = 4,
     disable_tqdm: bool = False,
     cache: bool = False,
+    force_split: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, DataLoader]:
     """One DataLoader per basin (for per-environment IRM/CORAL/VREx updates)."""
     return {
         b: make_dataloader(
             root, [b], split, batch_size, num_workers,
-            disable_tqdm=disable_tqdm, cache=cache, **kwargs,
+            disable_tqdm=disable_tqdm, cache=cache,
+            force_split=force_split, **kwargs,
         )
         for b in basins
     }
