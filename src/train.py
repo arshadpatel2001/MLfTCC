@@ -283,16 +283,22 @@ def _train_one_experiment_inner(
 
         for batch_idx in pbar:
             batches = {}
+            skip = False
             for b, it in env_iters.items():
                 try:
                     batch = next(it)
                 except StopIteration:
                     env_iters[b] = iter(train_loaders_per_env[b])
                     batch = next(env_iters[b])
+                if batch is None:  # tcnd_collate_fn: all samples had -1 labels
+                    skip = True
+                    break
                 batches[b] = {
                     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
+            if skip:
+                continue
 
             metrics = method.update(optimizer, batches, model,
                                     step=step, scaler=scaler, device=device)
