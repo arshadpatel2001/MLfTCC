@@ -131,14 +131,7 @@ All three heads share the same `z`. Each head is `Linear(d) → GELU → Dropout
 | Direction classification | `(B, 8)` logits | Cross-entropy |
 | Intensity regression | `(B, 2)` — [wind\_norm, pres\_norm] | NaN-masked MSE |
 
-Combined loss: `L = 1.0 × CE_intensity + 0.5 × CE_direction + reg_weight × MSE_regression`
-
-### Model sizes
-
-| Size | Spatial embed | Track embed | Env embed | Physics dim | Final dim | Params |
-|---|---|---|---|---|---|---|
-| `lightweight` (default) | 128 | 32 | 64 | 32 | 128 | ~0.6 M |
-| `complex` | 256 | 64 | 128 | 64 | 256 | ~4 M |
+Combined loss: `L = 1.0 × CE_intensity + 0.5 × CE_direction + 0.5 × MSE_regression`
 
 ---
 
@@ -198,7 +191,7 @@ CORAL distance is also computed between source and target feature distributions 
 
 ```
 src/
-├── data/
+├── dataset/
 │   └── dataset.py          — TCNDDataset, tcnd_collate_fn, make_dataloader, make_per_basin_loaders
 ├── models/
 │   └── backbone.py         — MultimodalBackbone, TaskHeads, TropiCycloneModel
@@ -206,9 +199,9 @@ src/
 │   └── dg_methods.py       — ERM, IRM, VREx, CORAL, DANN, MAML, PhysIRM
 ├── metrics/
 │   └── basin_metrics.py    — BasinEvaluator, BTG, BNTE, RI skill, CORAL distance
-train.py                    — Full training + benchmark runner
-analysis/
-└── visualize.py            — Figures and LaTeX tables
+├── scripts/
+│   └── visualize.py        — Figures and LaTeX tables
+└── train.py                — Full training + benchmark runner
 ```
 
 ---
@@ -288,31 +281,16 @@ python src/train.py \
 | `--methods` | all | Comma-separated subset, e.g. `erm,physirm` |
 | `--epochs` | `50` | Training epochs per experiment |
 | `--eval_every` | `5` | Validation frequency (epochs) |
-| `--model_size` | `lightweight` | `lightweight` (~0.6 M params) \| `complex` (~4 M params) |
-| `--reg_weight` | `0.5` | Weight on 24 h-ahead regression MSE loss (0 = classification only) |
 | `--scheduler` | `cosine` | `cosine` (CosineAnnealingLR) \| `onecycle` (OneCycleLR) |
-| `--no_3d` | off | Disable Data\_3d branch (ablation) |
-| `--no_env` | off | Disable Env-Data branch (ablation) |
 | `--compile` | off | `torch.compile` for A100/H100 throughput |
 | `--cache_data` | off | Cache full dataset in RAM (~50 GB) |
 | `--device` | `auto` | `cuda` \| `mps` \| `cpu` \| `auto` |
 | `--num_workers` | `8` | DataLoader worker count |
-| `--few_shot` | off | Run few-shot fine-tuning after zero-shot evaluation |
-| `--k_shots` | `32` | Number of target-basin examples for few-shot |
-| `--few_shot_epochs` | `5` | Fine-tuning epochs for few-shot |
 | `--resume` | — | Resume from checkpoint path, or `latest` to auto-find in `--output_dir` |
 | `--fail_fast` | off | Stop benchmark on first experiment failure |
+| `--no_tqdm` | off | Disable tqdm progress bars |
 
-### Architecture overrides
 
-| Flag | Default | Description |
-|---|---|---|
-| `--spatial_embed` | size-dependent | Spatial branch output dim |
-| `--track_embed` | size-dependent | Track branch output dim |
-| `--env_embed` | size-dependent | Environment branch output dim |
-| `--phys_dim` | size-dependent | Physics sub-space dimension |
-| `--final_dim` | size-dependent | Joint representation dimension |
-| `--dropout` | `0.1` | Dropout rate across all branches |
 
 ---
 
@@ -321,7 +299,7 @@ python src/train.py \
 After training, generate all paper figures and LaTeX tables from the benchmark results JSON:
 
 ```bash
-python analysis/visualize.py \
+python src/scripts/visualize.py \
     --results_dir ./runs \
     --output_dir ./figures
 ```
@@ -336,7 +314,6 @@ Additional figures available as callable functions in `visualize.py`:
 
 | Function | Figure |
 |---|---|
-| `plot_few_shot_curve()` | Accuracy vs. k-shots per method (Fig 3) |
 | `plot_tsne_physics()` | t-SNE of `z_phys` coloured by basin (Fig 6) |
 
 ---
@@ -374,11 +351,7 @@ Progressive source basin addition — reveals how cross-basin diversity of train
 ```
 Trains with 1, 2, …, 5 source basins sequentially for every method.
 
-### Few-Shot Fine-Tuning
-After zero-shot evaluation, freeze the backbone and fine-tune task heads on k labelled examples from the target basin's training split:
-```bash
---few_shot --k_shots 32 --few_shot_epochs 5
-```
+
 
 ---
 
