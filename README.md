@@ -7,7 +7,7 @@
 
 > 📊 **Presentation Slides**: The presentation slides for this project can be found in [`MLfTCC_Group_Project_Slides.pdf`](./MLfTCC_Group_Project_Slides.pdf).
 
-> 📑 **Peer Evaluation**: The peer evaluation (by a different group) can be found [here](https://imperiallondon-my.sharepoint.com/:b:/r/personal/nm1225_ic_ac_uk/Documents/others/Peer_eval.pdf?csf=1&web=1&e=VLdPBZ).
+> 📑 **Peer Evaluation**: The peer evaluation (by a different group) can be found [here](https://imperiallondon-my.sharepoint.com/:b:/g/personal/nm1225_ic_ac_uk/IQAQik2mBAOZSazXlTBshVn-AXocragJfOi7YhrBMgGvnYk).
 > *(Note: This link is only accessible via Imperial SharePoint login. Please ensure you are logged in for it to work. If you encounter issues, please reach out to our peer evaluator, Nathan, at [nathan.mani25@imperial.ac.uk](mailto:nathan.mani25@imperial.ac.uk).)*
 
 ---
