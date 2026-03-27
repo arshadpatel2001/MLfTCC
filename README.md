@@ -2,6 +2,8 @@
 
 Physics-guided domain generalization for **global tropical cyclone forecasting** across six ocean basins using the **TropiCycloneNet Dataset (TCND)** and a suite of domain generalization (DG) methods, culminating in the proposed **PhysIRM** — Physics-guided Invariant Risk Minimization.
 
+> 📊 **Presentation Slides**: The presentation slides for this project can be found in [`MLfTCC_Group_Project_Slides.pdf`](./MLfTCC_Group_Project_Slides.pdf).
+
 ---
 
 ## Overview
