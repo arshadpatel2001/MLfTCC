@@ -5,6 +5,17 @@
 > Course project: ELEC70127, Imperial College London
 > GitHub: https://github.com/arshadpatel2001/MLfTCC
 
+**Team Members**
+
+| Name | Student ID |
+|---|---|
+| Arshad Patel | 06048266 |
+| Thiruvikraman Anand | 06044996 |
+| Jude Abussaud | 06036602 |
+| Sarah Alharbi | 06064249 |
+
+Supervised by: Prof. Dr. Gege Wen
+
 > 📊 **Presentation Slides**: The presentation slides for this project can be found in [`MLfTCC_Group_Project_Slides.pdf`](./MLfTCC_Group_Project_Slides.pdf).
 
 > 📑 **Peer Evaluation**: The peer evaluation (by a different group) can be found [here](https://imperiallondon-my.sharepoint.com/:b:/g/personal/nm1225_ic_ac_uk/IQAQik2mBAOZSazXlTBshVn-AXocragJfOi7YhrBMgGvnYk).
