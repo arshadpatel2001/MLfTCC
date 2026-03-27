@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TropiCycloneNet — Architecture</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #ffffff;
+    color: #1a1a1a;
+    padding: 48px 32px 80px;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 56px;
+    letter-spacing: 0.2px;
+  }
+
+  /* ── Section label ─────────────────────────────────────── */
+  .section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    color: #aaa;
+    margin-bottom: 16px;
+  }
+
+  /* ── Grid layout ────────────────────────────────────────── */
+  .diagram {
+    display: grid;
+    grid-template-columns: 1fr 40px 1fr 40px 1fr 40px 1fr;
+    gap: 0;
+    align-items: start;
+    margin-bottom: 72px;
+  }
+
+  /* ── Columns ─────────────────────────────────────────────── */
+  .col { display: flex; flex-direction: column; gap: 12px; }
+
+  /* ── Arrows ──────────────────────────────────────────────── */
+  .arrow-col {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 38px;
+    color: #ccc;
+    font-size: 20px;
+    flex-direction: column;
+    gap: 72px;
+  }
+  .arr { color: #ccc; font-size: 18px; }
+  .arr-single {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 38px;
+  }
+
+  /* ── Boxes ───────────────────────────────────────────────── */
+  .box {
+    border: 1.5px solid #e5e5e5;
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: #fff;
+    position: relative;
+  }
+  .box-title {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: -0.1px;
+    margin-bottom: 4px;
+    color: #111;
+  }
+  .box-sub {
+    font-size: 11px;
+    color: #888;
+    line-height: 1.5;
+  }
+  .box-dim {
+    display: inline-block;
+    margin-top: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    background: #f5f5f5;
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: #555;
+  }
+
+  /* colour accents on left border */
+  .acc-blue   { border-left: 3px solid #3b82f6; }
+  .acc-violet { border-left: 3px solid #8b5cf6; }
+  .acc-green  { border-left: 3px solid #10b981; }
+  .acc-amber  { border-left: 3px solid #f59e0b; }
+  .acc-fused  { border-left: 3px solid #6366f1; }
+
+  /* task heads */
+  .acc-red    { border-left: 3px solid #ef4444; }
+  .acc-orange { border-left: 3px solid #f97316; }
+  .acc-sky    { border-left: 3px solid #0ea5e9; }
+  .acc-teal   { border-left: 3px solid #14b8a6; }
+
+  /* ── Fusion box ───────────────────────────────────────────── */
+  .fusion-box {
+    border: 1.5px solid #e5e5e5;
+    border-radius: 10px;
+    padding: 18px 16px;
+    background: #fafafa;
+    border-left: 3px solid #6366f1;
+  }
+  .fusion-box .box-title { color: #6366f1; }
+
+  /* ── Data flow arrow horizontal ──────────────────────────── */
+  .h-arrow {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 36px;
+  }
+  .h-arrow svg { width: 24px; height: 24px; }
+
+  /* ── Loss panel ──────────────────────────────────────────── */
+  .loss-section { margin-bottom: 64px; }
+  .loss-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+  .loss-box {
+    border: 1.5px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 12px 14px;
+    background: #fff;
+  }
+  .loss-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .loss-formula {
+    font-size: 11px;
+    color: #555;
+    font-family: "SF Mono", "Fira Mono", monospace;
+    line-height: 1.6;
+  }
+  .loss-note { font-size: 10px; color: #aaa; margin-top: 4px; }
+
+  /* ── DG methods panel ────────────────────────────────────── */
+  .dg-section { margin-bottom: 64px; }
+  .dg-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 10px;
+  }
+  .dg-box {
+    border: 1.5px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: center;
+    background: #fff;
+  }
+  .dg-name {
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 3px;
+    color: #111;
+  }
+  .dg-desc { font-size: 10px; color: #999; line-height: 1.4; }
+
+  /* ── Data flow section ───────────────────────────────────── */
+  .flow-section { margin-bottom: 64px; }
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .flow-box {
+    border: 1.5px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 10px 14px;
+    white-space: nowrap;
+    font-size: 11px;
+    background: #fff;
+    flex-shrink: 0;
+  }
+  .flow-box b { font-size: 12px; display: block; margin-bottom: 2px; }
+  .flow-dim { font-size: 10px; color: #aaa; font-family: monospace; }
+  .flow-arr {
+    color: #d1d5db;
+    font-size: 16px;
+    padding: 0 8px;
+    flex-shrink: 0;
+  }
+
+  /* ── Divider ─────────────────────────────────────────────── */
+  .divider { border: none; border-top: 1px solid #f0f0f0; margin: 48px 0; }
+
+  /* ── Legend ──────────────────────────────────────────────── */
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #555; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<h1>TropiCycloneNet — Unified Architecture</h1>
+<p class="subtitle">Multimodal domain-generalizing TC forecasting &nbsp;·&nbsp; Track · Intensity · Direction · Regression</p>
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 1 — INPUT → ENCODERS → FUSION → HEADS
+     ═══════════════════════════════════════════════════════ -->
+<div class="section-label">Model Architecture</div>
+
+<div class="diagram">
+
+  <!-- Col 1: Inputs -->
+  <div class="col">
+    <div class="box acc-blue">
+      <div class="box-title">Data3D</div>
+      <div class="box-sub">ERA5 atmospheric patch<br>u, v, z (4 pressure levels) + SST</div>
+      <span class="box-dim">13 × 81 × 81</span>
+    </div>
+    <div class="box acc-green">
+      <div class="box-title">Data1D</div>
+      <div class="box-sub">IBTrACS track features<br>LONG, LAT, PRES, WND (normalized)</div>
+      <span class="box-dim">4-dim</span>
+    </div>
+    <div class="box acc-violet">
+      <div class="box-title">Env-Data</div>
+      <div class="box-sub">Pre-computed env context<br>month, area, intensity class,<br>location, history direction</div>
+      <span class="box-dim">94-dim</span>
+    </div>
+    <div class="box acc-amber">
+      <div class="box-title">Physics Features</div>
+      <div class="box-sub">SST anomaly, wind shear,<br>Coriolis, MPI proxy,<br>BL moisture, steering</div>
+      <span class="box-dim">8-dim</span>
+    </div>
+  </div>
+
+  <!-- Arrow 1 -->
+  <div class="arrow-col">
+    <span class="arr">→</span>
+    <span class="arr">→</span>
+    <span class="arr">→</span>
+    <span class="arr">→</span>
+  </div>
+
+  <!-- Col 2: Encoders -->
+  <div class="col">
+    <div class="box acc-blue">
+      <div class="box-title">SpatialEncoder (3D-CNN)</div>
+      <div class="box-sub">Stem → ResBlock × 3 → SE<br>Squeeze-Excite attention<br>GAP + GMP → MLP proj</div>
+      <span class="box-dim">→ 128-dim z_spatial</span>
+    </div>
+    <div class="box acc-green">
+      <div class="box-title">TrackEncoder (MLP)</div>
+      <div class="box-sub">Linear → LayerNorm → ReLU<br>3-layer MLP</div>
+      <span class="box-dim">→ 32-dim z_track</span>
+    </div>
+    <div class="box acc-violet">
+      <div class="box-title">EnvEncoder (Env-T-Net)</div>
+      <div class="box-sub">Field-specific projections<br>month(12), area(6), intensity(6)<br>scalars(2), long(36), lat(12)<br>history dirs(8+8+4) → fuse MLP</div>
+      <span class="box-dim">→ 64-dim z_env_raw</span>
+    </div>
+    <div class="box acc-amber">
+      <div class="box-title">PhysicsEncoder (MLP)</div>
+      <div class="box-sub">Linear → LayerNorm → GELU<br>2-layer MLP</div>
+      <span class="box-dim">→ 32-dim z_phys_enc</span>
+    </div>
+  </div>
+
+  <!-- Arrow 2 -->
+  <div class="h-arrow">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2">
+      <path d="M5 12h14M13 6l6 6-6 6"/>
+    </svg>
+  </div>
+
+  <!-- Col 3: Fusion -->
+  <div class="col" style="justify-content: flex-start; padding-top: 0;">
+    <div class="fusion-box" style="height: 100%;">
+      <div class="box-title" style="font-size:13px; margin-bottom:10px;">MultimodalBackbone</div>
+
+      <div style="font-size:11px; color:#555; margin-bottom:12px;">
+        Concatenate z_spatial + z_track + z_env_raw
+      </div>
+      <div class="box-dim" style="margin-bottom:14px;">224-dim concat</div>
+
+      <div style="font-size:11px; color:#555; margin-bottom:6px;">
+        Projector MLP<br>
+        <span style="color:#999; font-family:monospace; font-size:10px;">224 → 256 → 128</span>
+      </div>
+      <div class="box-dim" style="margin-bottom:14px;">128-dim z_full</div>
+
+      <div style="font-size:11px; color:#555; margin-bottom:6px; border-top:1px solid #eee; padding-top:10px;">
+        Split into sub-spaces
+      </div>
+      <div style="font-size:11px; margin-bottom:4px;">
+        <span style="color:#6366f1; font-weight:600;">z_env</span>
+        <span style="color:#888; font-size:10px; margin-left:4px;">96-dim synoptic</span>
+      </div>
+      <div style="font-size:11px; margin-bottom:12px;">
+        <span style="color:#f59e0b; font-weight:600;">z_phys</span>
+        <span style="color:#888; font-size:10px; margin-left:4px;">32-dim + phys_enc injection</span>
+      </div>
+      <div style="font-size:11px; color:#555; border-top:1px solid #eee; padding-top:10px;">
+        Reconstruct z = cat(z_env, z_phys)
+      </div>
+      <div class="box-dim">128-dim z  (shared by all heads)</div>
+    </div>
+  </div>
+
+  <!-- Arrow 3 -->
+  <div class="h-arrow">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2">
+      <path d="M5 12h14M13 6l6 6-6 6"/>
+    </svg>
+  </div>
+
+  <!-- Col 4: Task Heads -->
+  <div class="col">
+    <div class="box acc-red">
+      <div class="box-title">Intensity Head</div>
+      <div class="box-sub">Linear → GELU → Dropout → Linear<br>4-class CE loss</div>
+      <span class="box-dim">z → (B, 4) logits</span>
+    </div>
+    <div class="box acc-orange">
+      <div class="box-title">Direction Head</div>
+      <div class="box-sub">Linear → GELU → Dropout → Linear<br>8-class CE loss</div>
+      <span class="box-dim">z → (B, 8) logits</span>
+    </div>
+    <div class="box acc-sky">
+      <div class="box-title">Intensity Regression Head</div>
+      <div class="box-sub">Linear → GELU → Dropout → Linear<br>Predicts wind + pressure 24h ahead<br>MSE loss, NaN-masked</div>
+      <span class="box-dim">z → (B, 2)</span>
+    </div>
+    <div class="box acc-teal" style="border: 2px solid #14b8a6; background: #f0fdfa;">
+      <div class="box-title" style="color:#0f766e;">Track Forecast Head ★</div>
+      <div class="box-sub">Linear → GELU → Dropout → Linear<br>Predicts future lat/lon at<br>t+6h · t+12h · t+18h · t+24h<br>MSE loss, NaN-masked per step</div>
+      <span class="box-dim">z → (B, 4, 2)</span>
+    </div>
+  </div>
+
+  <!-- Arrow 4 -->
+  <div class="arrow-col">
+    <span class="arr">→</span>
+    <span class="arr">→</span>
+    <span class="arr">→</span>
+    <span class="arr">→</span>
+  </div>
+
+  <!-- Col 5: Outputs -->
+  <div class="col">
+    <div class="box" style="border-left:3px solid #ef4444; background:#fff5f5;">
+      <div class="box-title">Intensity Class</div>
+      <div class="box-sub">Weakening / Steady<br>Intensification / RI</div>
+      <span class="box-dim">0–3 class</span>
+    </div>
+    <div class="box" style="border-left:3px solid #f97316; background:#fff7ed;">
+      <div class="box-title">Move Direction</div>
+      <div class="box-sub">N NE E SE S SW W NW</div>
+      <span class="box-dim">0–7 class</span>
+    </div>
+    <div class="box" style="border-left:3px solid #0ea5e9; background:#f0f9ff;">
+      <div class="box-title">Wind + Pressure</div>
+      <div class="box-sub">24h-ahead WND_norm<br>24h-ahead PRES_norm</div>
+      <span class="box-dim">2 values</span>
+    </div>
+    <div class="box" style="border-left:3px solid #14b8a6; background:#f0fdfa;">
+      <div class="box-title">Future Track ★</div>
+      <div class="box-sub">LONG_norm, LAT_norm<br>@ t+6h, t+12h, t+18h, t+24h<br>ADE / FDE in km (Haversine)</div>
+      <span class="box-dim">4 × (lon, lat)</span>
+    </div>
+  </div>
+
+</div><!-- /.diagram -->
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 2 — TOTAL LOSS
+     ═══════════════════════════════════════════════════════ -->
+<div class="loss-section">
+  <div class="section-label">Combined Task Loss</div>
+
+  <div style="font-size:12px; color:#555; margin-bottom:16px; font-family:monospace; background:#fafafa; border:1px solid #eee; border-radius:8px; padding:14px 18px; line-height:2;">
+    L&nbsp; =&nbsp; <b>1.0</b> · CE(intensity)
+    &nbsp;+&nbsp; <b>0.5</b> · CE(direction)
+    &nbsp;+&nbsp; <b>0.5</b> · MSE(wind, pres)&nbsp;<span style="color:#aaa">← NaN-masked</span>
+    &nbsp;+&nbsp; <b>0.5</b> · MSE(pred_track, y_track)&nbsp;<span style="color:#0f766e">← NaN-masked per step ★</span>
+  </div>
+
+  <div class="loss-grid">
+    <div class="loss-box" style="border-left:3px solid #ef4444;">
+      <div class="loss-label" style="color:#ef4444;">Intensity</div>
+      <div class="loss-formula">CE(logits_int, y_int)<br>weight = 1.0</div>
+      <div class="loss-note">4-class (Weak/Steady/Int/RI)</div>
+    </div>
+    <div class="loss-box" style="border-left:3px solid #f97316;">
+      <div class="loss-label" style="color:#f97316;">Direction</div>
+      <div class="loss-formula">CE(logits_dir, y_dir)<br>weight = 0.5</div>
+      <div class="loss-note">8-class (N/NE/E/SE/S/SW/W/NW)</div>
+    </div>
+    <div class="loss-box" style="border-left:3px solid #0ea5e9;">
+      <div class="loss-label" style="color:#0ea5e9;">Intensity Reg</div>
+      <div class="loss-formula">MSE(pred_reg, y_reg)<br>weight = 0.5</div>
+      <div class="loss-note">24h wind + pressure; NaN at end-of-storm</div>
+    </div>
+    <div class="loss-box" style="border-left:3px solid #14b8a6; background:#f0fdfa;">
+      <div class="loss-label" style="color:#0f766e;">Track Forecast ★</div>
+      <div class="loss-formula">MSE(pred_track, y_track)<br>weight = 0.5</div>
+      <div class="loss-note">4 steps × (lon,lat); per-step NaN mask</div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 3 — DG METHODS
+     ═══════════════════════════════════════════════════════ -->
+<div class="dg-section">
+  <div class="section-label">Domain Generalization Methods — LOBO Benchmark</div>
+  <div style="font-size:11px; color:#888; margin-bottom:16px;">All 7 methods call <code style="background:#f5f5f5; padding:1px 4px; border-radius:3px;">per_env_loss(model, batch)</code> → includes all 4 task losses automatically.</div>
+  <div class="dg-grid">
+    <div class="dg-box">
+      <div class="dg-name">ERM</div>
+      <div class="dg-desc">Pool all basins, minimize mean loss</div>
+    </div>
+    <div class="dg-box">
+      <div class="dg-name">IRM</div>
+      <div class="dg-desc">Invariant gradients across basins (cls only)</div>
+    </div>
+    <div class="dg-box">
+      <div class="dg-name">V-REx</div>
+      <div class="dg-desc">Variance penalty on per-env losses</div>
+    </div>
+    <div class="dg-box">
+      <div class="dg-name">CORAL</div>
+      <div class="dg-desc">Align feature covariances cross-basin</div>
+    </div>
+    <div class="dg-box">
+      <div class="dg-name">DANN</div>
+      <div class="dg-desc">Adversarial domain discriminator + GRL</div>
+    </div>
+    <div class="dg-box">
+      <div class="dg-name">MAML</div>
+      <div class="dg-desc">Meta-learn fast basin adaptation</div>
+    </div>
+    <div class="dg-box" style="background:#fafff8; border-color:#d1fae5;">
+      <div class="dg-name" style="color:#059669;">PhysIRM ★</div>
+      <div class="dg-desc">IRM on z_phys + orthogonality + physics grounding</div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 4 — DATA FLOW (per sample)
+     ═══════════════════════════════════════════════════════ -->
+<div class="flow-section">
+  <div class="section-label">Per-Sample Data Flow</div>
+
+  <div class="flow-row" style="margin-bottom:12px;">
+    <div class="flow-box" style="border-left:3px solid #3b82f6;">
+      <b>Data3D .nc</b>
+      <div class="flow-dim">13 × 81 × 81</div>
+      <div class="flow-dim">per-sample z-scored</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #3b82f6;">
+      <b>SpatialEncoder</b>
+      <div class="flow-dim">CNN + SE + pool</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box">
+      <b>z_spatial</b>
+      <div class="flow-dim">(B, 128)</div>
+    </div>
+    <span class="flow-arr" style="color:#e5e7eb;">╮</span>
+  </div>
+
+  <div class="flow-row" style="margin-bottom:12px;">
+    <div class="flow-box" style="border-left:3px solid #10b981;">
+      <b>Data1D .txt</b>
+      <div class="flow-dim">LONG LAT PRES WND</div>
+      <div class="flow-dim">4-dim normalized</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #10b981;">
+      <b>TrackEncoder</b>
+      <div class="flow-dim">3-layer MLP</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box">
+      <b>z_track</b>
+      <div class="flow-dim">(B, 32)</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #6366f1; background:#f5f3ff;">
+      <b>Concat → Project</b>
+      <div class="flow-dim">224 → 128-dim z</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #6366f1; background:#f5f3ff;">
+      <b>Split z_env / z_phys</b>
+      <div class="flow-dim">96 + 32 dim</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #6366f1; background:#f5f3ff;">
+      <b>z  (B, 128)</b>
+      <div class="flow-dim">shared representation</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #14b8a6; background:#f0fdfa;">
+      <b>4 Task Heads</b>
+      <div class="flow-dim">int · dir · reg · track</div>
+    </div>
+  </div>
+
+  <div class="flow-row" style="margin-bottom:12px;">
+    <div class="flow-box" style="border-left:3px solid #8b5cf6;">
+      <b>Env-Data .npy</b>
+      <div class="flow-dim">94-dim one-hot vec</div>
+      <div class="flow-dim">class_to_ohe fix applied</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #8b5cf6;">
+      <b>EnvEncoder</b>
+      <div class="flow-dim">field-specific projections</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box">
+      <b>z_env_raw</b>
+      <div class="flow-dim">(B, 64)</div>
+    </div>
+    <span class="flow-arr" style="color:#e5e7eb;">╯</span>
+  </div>
+
+  <div class="flow-row">
+    <div class="flow-box" style="border-left:3px solid #f59e0b;">
+      <b>Phys Features</b>
+      <div class="flow-dim">SST · shear · Coriolis</div>
+      <div class="flow-dim">8-dim computed on-the-fly</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box" style="border-left:3px solid #f59e0b;">
+      <b>PhysicsEncoder</b>
+      <div class="flow-dim">2-layer MLP + GELU</div>
+    </div>
+    <span class="flow-arr">→</span>
+    <div class="flow-box">
+      <b>z_phys_enc</b>
+      <div class="flow-dim">(B, 32) injected into z_phys</div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 5 — EVALUATION
+     ═══════════════════════════════════════════════════════ -->
+<div class="flow-section">
+  <div class="section-label">Evaluation Metrics — BasinEvaluator</div>
+  <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px;">
+    <div class="box" style="border-left:3px solid #ef4444;">
+      <div class="box-title">Classification</div>
+      <div class="box-sub">Accuracy, Precision, Recall, F1<br>Intensity (4-class) + Direction (8-class)<br>RI-F1 (Rapid Intensification)</div>
+    </div>
+    <div class="box" style="border-left:3px solid #0ea5e9;">
+      <div class="box-title">Intensity Regression</div>
+      <div class="box-sub">MAE wind (m/s)<br>MAE pressure (hPa)<br>normalized + physical units</div>
+    </div>
+    <div class="box" style="border-left:3px solid #14b8a6; background:#f0fdfa;">
+      <div class="box-title">Track Forecast ★</div>
+      <div class="box-sub">ADE (km) — mean all steps<br>FDE (km) — step t+24h<br>Per-step ADE: t+6h..t+24h<br>Haversine great-circle distance</div>
+    </div>
+    <div class="box" style="border-left:3px solid #6366f1;">
+      <div class="box-title">Domain Transfer</div>
+      <div class="box-sub">BTG (Basin Transfer Gap)<br>BNTE (Transfer Efficiency)<br>CORAL distance (domain gap)<br>LOBO: 6-fold cross-basin eval</div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ═══════════════════════════════════════════════════════
+     LEGEND
+     ═══════════════════════════════════════════════════════ -->
+<div class="section-label">Legend</div>
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#3b82f6;"></div> Data3D / Spatial branch</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#10b981;"></div> Data1D / Track branch</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#8b5cf6;"></div> Env-Data branch</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f59e0b;"></div> Physics branch (PhysIRM)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#6366f1;"></div> Fusion / shared representation</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#14b8a6;"></div> Track Forecast Head ★ (new addition)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ef4444;"></div> Classification heads</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#0ea5e9;"></div> Regression head</div>
+</div>
+
+<div style="margin-top:40px; font-size:11px; color:#bbb;">
+  ★ Track forecasting is integrated into TropiCycloneModel alongside intensity/direction/regression tasks.
+  All 7 DG methods (ERM→PhysIRM) apply to all 4 tasks jointly via a single <code style="font-family:monospace;">model(batch)</code> call.
+  Basins: WP · NA · EP · NI · SI · SP &nbsp;|&nbsp; LOBO: train on 5, evaluate zero-shot on 6th.
+</div>
+
+</body>
+</html>
