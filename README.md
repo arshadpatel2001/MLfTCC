@@ -36,13 +36,13 @@ TCND/
 │       └── test/                    ← Held-out test storms  (2017–2021 approx)
 │           └── {BASIN}{YEAR}BST{NAME}.txt   (8-col, whitespace-separated)
 │
-├── Data3D/                          ← ERA5 meteorological grid patches (no split subfolder)
-│   └── {BASIN}/{YEAR}/{NAME}/
+├── Data3D/                          ← ERA5 meteorological grid patches
+│   └── {BASIN}/{YEAR}/{NAME}/       ← Flexible path (can be direct under root or basin)
 │       └── TCND_{NAME}_{YYYYMMDDHH}_sst_z_u_v.nc    (13 channels, 81×81, 6-hourly)
 │
-└── Env-Data/                        ← Pre-computed environmental features (no split subfolder)
+└── Env-Data/                        ← Pre-computed environmental features
     └── {BASIN}/{YEAR}/{NAME}/
-        └── {YYYYMMDDHH}.npy         (94-dim feature dict + classification labels)
+        └── {YYYYMMDDHH}.npy         (94-dim feature context + classification labels)
 ```
 
 ### Modalities
@@ -204,6 +204,34 @@ src/
 ├── scripts/
 │   └── visualize.py        — Figures and LaTeX tables
 └── train.py                — Full training + benchmark runner
+
+Abalation-Study/             — Research and development sandbox
+├── nb_01_feature_analysis.ipynb — Statistical analysis of physical features
+├── nb_03_ablation.ipynb         — Model architecture and data scaling benchmarks
+└── src/                         — Research models and experiments
+    ├── models/                  — LSTM, LSTM-attn, Transformer architectures
+    └── experiments/             — Pooled, LOBO, and Few-shot protocols
+
+---
+
+## Research Ablation Study
+
+A detailed investigation into architecture components, feature importance, and model adaptation strategies was conducted using the `Abalation-Study` codebase.
+
+### 1. Model Architectures
+- **LSTM Seq2Seq**: Standard recurrent baseline.
+- **LSTM + Attention**: Augments the LSTM with basin-conditioned attention and embeddings.
+- **Transformer Seq2Seq**: Non-autoregressive encoder-decoder for long-range sequence modeling.
+
+### 2. Experiment Protocols
+- **Pooled**: Baseline trained on all basins to establish an in-distribution performance upper bound.
+- **LOBO (Leave-One-Basin-Out)**: Evaluates zero-shot cross-basin generalization.
+- **Few-shot Adaptation**: Measures how rapidly a LOBO-pretrained model adapts to a new basin given small fractions (1%–50%) of target-basin data.
+
+### 3. Key Findings
+- **Feature Importance**: Gradient-based importance analysis identifies **relative displacement** (`Δlon`, `Δlat`) as the dominant predictors, accounting for **~88.8%** of model attention. Environmental scalar features provide fine-grained corrections but are secondary to motion history.
+- **Architecture Performance**: While Transformer models show promise, the **LSTM-Attention** variant remains highly competitive for 24h forecasting tasks, particularly when combined with basin embeddings.
+- **Data Scaling**: Model performance scales logarithmically with data volume. Sharp degradation in ADE observed when training data is reduced below **25%** of the full TCND volume.
 ```
 
 ---
@@ -277,22 +305,20 @@ python src/train.py \
 | Flag | Default | Description |
 |---|---|---|
 | `--mode` | `lobo` | `lobo` \| `single` \| `incremental` |
-| `--data_mode` | `test_only` | `test_only` \| `full` |
+| `--data_mode` | `test_only` | `test_only` (graceful fallback) \| `full` (strict train/val/test splits) |
 | `--data_root` | *(required)* | Path to TCND root containing `Data1D/`, `Data3D/`, `Env-Data/` |
 | `--output_dir` | `./runs` | Directory for checkpoints and results JSON |
 | `--methods` | all | Comma-separated subset, e.g. `erm,physirm` |
 | `--epochs` | `50` | Training epochs per experiment |
 | `--eval_every` | `5` | Validation frequency (epochs) |
-| `--scheduler` | `cosine` | `cosine` (CosineAnnealingLR) \| `onecycle` (OneCycleLR) |
-| `--compile` | off | `torch.compile` for A100/H100 throughput |
-| `--cache_data` | off | Cache full dataset in RAM (~50 GB) |
+| `--scheduler` | `cosine` | `cosine` \| `onecycle` (faster convergence) |
+| `--resume` | — | Path to checkpoint, or `latest` to auto-find in `--output_dir` |
+| `--cache_data` | off | Cache full dataset in RAM (~50 GB; disables multiprocessing) |
+| `--compile` | off | `torch.compile` for higher throughput (skipped for MAML on MPS) |
 | `--device` | `auto` | `cuda` \| `mps` \| `cpu` \| `auto` |
 | `--num_workers` | `8` | DataLoader worker count |
-| `--resume` | — | Resume from checkpoint path, or `latest` to auto-find in `--output_dir` |
 | `--fail_fast` | off | Stop benchmark on first experiment failure |
 | `--no_tqdm` | off | Disable tqdm progress bars |
-
-
 
 ---
 
