@@ -243,12 +243,6 @@ Default hyperparameters (all methods use `batch_size=128`, `weight_decay=1e-4`, 
 - **WP is the universal anchor** — WP appears in the optimal source set for 5 out of 6 target basins (NA, EP, NI, SI, SP).
 - **NI benefits most from transfer** — In-domain NI = 0.464 IntAcc (only 28 test samples). WP as source achieves 0.714 (+54%).
 
-### Greedy Source Selection
-
-- **2–3 sources are enough** — adding more sources beyond the greedy optimum hurts.
-- **Geography is not destiny** — NI's best sources are SI+SP+WP (two southern-hemisphere basins); EP's best set includes NI and SI alongside NA.
-- NI greedy (SI+SP+WP) achieves 0.679 IntAcc vs 0.464 in-domain (+46%).
-
 ### Ablation Study — DG Methods (all 6 methods, targets NI and SI, test data)
 
 | Method | NI IntAcc | NI DirAcc | NI WindMAE | SI IntAcc | SI DirAcc | SI WindMAE |
@@ -268,14 +262,21 @@ Default hyperparameters (all methods use `batch_size=128`, `weight_decay=1e-4`, 
 
 With the full TrainData (train/val/test splits), PhysIRM on SI improves further: IntAcc → 0.575, WindMAE → 4.35 m/s.
 
-### LOBO vs Greedy Source Composition
+### LOBO vs Greedy Source Composition (PhysIRM, test data)
 
-| Target | LOBO IntAcc | Greedy IntAcc | Winner |
-|---|---|---|---|
-| SI | 0.575 | 0.556 | LOBO (−3.7%) |
-| NA | — | — | LOBO (−7.0%) |
-| WP | 0.503 | **0.618** | Greedy (+11.5%) |
-| NI | 0.464 | 0.464 | Tied (floor-locked) |
+Greedy-optimal sources were identified in `nb_full_02` via validation loss, then compared against LOBO (all 5 sources) in `nb_full_03`.
+
+| Target | Greedy Sources | LOBO IntAcc | Greedy IntAcc | Δ | Winner |
+|---|---|---|---|---|---|
+| NI | SI+SP+WP | 0.464 | 0.464 | 0.000 | Tie (floor-locked) |
+| SI | NA+SP+WP | **0.531** | 0.494 | −0.037 | LOBO |
+| WP | EP+NI+SP | 0.503 | **0.618** | **+0.115** | Greedy |
+| NA | EP+NI+SI+WP | **0.485** | 0.415 | −0.070 | LOBO |
+
+- **Greedy only helps when the signal is clean** — WP has sufficient test samples and clean classification signal; greedy wins by +11.5%, the largest gain in the entire study.
+- **LOBO wins for NA and SI** — greedy sources were selected by regression-weighted val_loss; when that diverges from IntAcc, LOBO's source diversity wins.
+- **NI is floor-locked regardless** — all source configurations return 0.464 (28 test samples → majority-class ceiling).
+- **Geography is not destiny** — WP's best sources are EP+NI+SP; NI's best are SI+SP+WP (two southern-hemisphere basins).
 
 ### Full Dataset (TrainData) vs Test-Only Data — SI Basin, PhysIRM
 
