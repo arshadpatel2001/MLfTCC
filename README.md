@@ -249,18 +249,24 @@ Default hyperparameters (all methods use `batch_size=128`, `weight_decay=1e-4`, 
 - **Geography is not destiny** — NI's best sources are SI+SP+WP (two southern-hemisphere basins); EP's best set includes NI and SI alongside NA.
 - NI greedy (SI+SP+WP) achieves 0.679 IntAcc vs 0.464 in-domain (+46%).
 
-### Ablation Study — DG Methods (target = SI)
+### Ablation Study — DG Methods (all 6 methods, targets NI and SI, test data)
 
-| Method | IntAcc | WindMAE (m/s) |
-|---|---|---|
-| ERM | — | — |
-| DANN | **0.610** | 5.84 (worst) |
-| PhysIRM (test data) | 0.560 | **5.09** |
-| PhysIRM (full training data) | **0.575** | **4.35** |
+| Method | NI IntAcc | NI DirAcc | NI WindMAE | SI IntAcc | SI DirAcc | SI WindMAE |
+|---|---|---|---|---|---|---|
+| ERM | 0.464 | 0.321 | 3.13 | **0.568** | **0.274** | 5.35 |
+| IRM | 0.464 | 0.321 | 2.91 | 0.560 | 0.237 | 6.46 |
+| VREx | 0.464 | 0.107 ⚠ | **2.68** | 0.494 | 0.008 ⚠ | 7.19 |
+| CORAL | 0.464 | 0.321 | 3.97 | 0.485 | 0.253 | 6.39 |
+| DANN | 0.464 | 0.321 | 4.79 | **0.610** | 0.241 | 5.84 |
+| **PhysIRM** | 0.464 | 0.321 | 3.11 | 0.560 | 0.270 | **5.09** |
 
-- **DANN** wins classification (SI IntAcc = 0.610) but sacrifices regression (WindMAE = 5.84 m/s, worst among competitive methods).
-- **PhysIRM** achieves the best regression across all experiments (WindMAE = 4.35 m/s on full training data) — the most balanced method overall.
-- **NI is floor-locked** — all methods tie at 0.464 IntAcc (28 test samples → majority-class ceiling).
+- **NI is floor-locked** — all methods tie at 0.464 IntAcc (only 28 test samples → majority-class ceiling).
+- **DANN** wins SI classification (0.610) but sacrifices regression (WindMAE = 5.84) and direction accuracy (0.241).
+- **VREx** achieves the best WindMAE on NI (2.68) but catastrophically collapses direction accuracy — 0.107 on NI and 0.008 on SI (essentially random).
+- **PhysIRM** achieves the best SI WindMAE (5.09) and is the most balanced method — maintains direction accuracy above 0.27 on SI while competitive on both other metrics.
+- **ERM** wins SI DirAcc (0.274) and SI IntAcc (0.568), making it a strong baseline.
+
+With the full TrainData (train/val/test splits), PhysIRM on SI improves further: IntAcc → 0.575, WindMAE → 4.35 m/s.
 
 ### LOBO vs Greedy Source Composition
 
